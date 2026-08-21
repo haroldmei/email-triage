@@ -1,0 +1,3 @@
+# This module has one orchestration helper that carries review-routing context.
+# Keep the project-wide warning gate strict while permitting that 8-argument helper.
+too-many-arguments-threshold = 8
