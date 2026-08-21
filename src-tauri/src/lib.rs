@@ -2,10 +2,13 @@ pub mod config;
 pub mod credentials;
 pub mod extraction;
 pub mod google_drive;
+pub mod logging;
 pub mod mail;
 pub mod models;
 pub mod scheduler;
 pub mod workflow;
+
+use std::time::Duration;
 
 use tauri::{
     menu::{Menu, MenuItem},
@@ -13,6 +16,7 @@ use tauri::{
     AppHandle, Manager, State, WindowEvent,
 };
 use tauri_plugin_autostart::{MacosLauncher, ManagerExt};
+use tokio::time::timeout;
 
 use credentials::{CredentialStore, PlatformCredentialStore, MAIL_SERVICE};
 use extraction::{DeterministicExtractor, IdentityExtractor};
@@ -111,23 +115,42 @@ fn set_drive_root(app: AppHandle, folder_id: String) -> Result<(), String> {
 }
 
 #[tauri::command]
+fn get_log_path(app: AppHandle) -> Result<String, String> {
+    logging::log_path(&app).map(|path| path.display().to_string())
+}
+
+#[tauri::command]
 async fn process_now(
     app: AppHandle,
     gate: State<'_, ProcessingGate>,
 ) -> Result<Vec<ProcessingResult>, String> {
     let gate = gate.inner().clone();
-    if !scheduler::try_enter(&gate) {
-        return Err("Email processing is already running".into());
-    }
-
-    let result = match config::load(&app) {
-        Ok(app_config) => workflow::process_once(&app_config, 100)
-            .await
-            .map_err(|e| e.to_string()),
-        Err(error) => Err(error.to_string()),
+    let Some(_lease) = scheduler::try_enter(&gate, "manual") else {
+        let source = scheduler::current_source(&gate).unwrap_or_else(|| "unknown".into());
+        return Err(format!("Email processing is already running ({source})"));
     };
-    scheduler::leave(&gate);
-    result
+
+    logging::write(&app, "INFO", "manual processing started");
+    let app_config = config::load(&app).map_err(|e| e.to_string())?;
+    let result = timeout(Duration::from_secs(120), workflow::process_once(&app_config, 100)).await;
+    match result {
+        Ok(Ok(results)) => {
+            logging::write(
+                &app,
+                "INFO",
+                format!("manual processing completed: {} message(s)", results.len()),
+            );
+            Ok(results)
+        }
+        Ok(Err(error)) => {
+            logging::write(&app, "ERROR", format!("manual processing failed: {error}"));
+            Err(error.to_string())
+        }
+        Err(_) => {
+            logging::write(&app, "ERROR", "manual processing timed out after 120 seconds");
+            Err("Email processing timed out after 120 seconds. Check the local app log for the last completed stage.".into())
+        }
+    }
 }
 
 #[tauri::command]
@@ -198,6 +221,7 @@ pub fn run() {
                 MacosLauncher::LaunchAgent,
                 None,
             ))?;
+            logging::write(app.handle(), "INFO", "Email Triage started");
             setup_tray(app)?;
             scheduler::start(app.handle().clone());
             Ok(())
@@ -216,6 +240,7 @@ pub fn run() {
             connect_google_account,
             list_drive_folders,
             set_drive_root,
+            get_log_path,
             process_now,
             get_autostart,
             set_autostart,
