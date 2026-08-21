@@ -30,18 +30,28 @@ pub fn state_path(app: &AppHandle) -> Result<PathBuf, String> {
         .map_err(|e| format!("could not resolve local processing state directory: {e}"))
 }
 
-pub fn is_terminal(
+pub fn select_pending_uids(
     app: &AppHandle,
     mail: &MailConfig,
     uid_validity: u32,
-    uid: u32,
-) -> Result<bool, String> {
+    all_uids: &[u32],
+    limit: usize,
+) -> Result<(Vec<u32>, usize), String> {
     let ledger = load(app)?;
-    Ok(ledger.entries.contains_key(&message_key(
-        mail,
-        uid_validity,
-        uid,
-    )))
+    let mut pending = all_uids
+        .iter()
+        .copied()
+        .filter(|uid| {
+            !ledger
+                .entries
+                .contains_key(&message_key(mail, uid_validity, *uid))
+        })
+        .collect::<Vec<_>>();
+    let skipped_terminal = all_uids.len().saturating_sub(pending.len());
+    if pending.len() > limit {
+        pending = pending.split_off(pending.len() - limit);
+    }
+    Ok((pending, skipped_terminal))
 }
 
 pub fn mark_terminal(
