@@ -47,8 +47,8 @@ fn collect_parts(part: &ParsedMail<'_>, output: &mut ParsedMessage) -> Result<()
         .cloned()
         .or_else(|| part.ctype.params.get("name").cloned());
 
-    let is_attachment = matches!(disposition.disposition, DispositionType::Attachment)
-        || filename.is_some();
+    let is_attachment =
+        matches!(disposition.disposition, DispositionType::Attachment) || filename.is_some();
 
     if is_attachment {
         let filename = filename.unwrap_or_else(|| "attachment.bin".to_string());
