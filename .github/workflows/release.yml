@@ -1,11 +1,36 @@
 name: Desktop Release Build
+
 on:
   workflow_dispatch:
   pull_request:
   push:
     tags: ['v*']
+
+permissions:
+  contents: write
+
 jobs:
+  validate-version:
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Ensure tag matches app version
+        shell: bash
+        run: |
+          expected="v$(node -p "require('./package.json').version")"
+          actual="${GITHUB_REF_NAME}"
+          if [[ "$actual" != "$expected" ]]; then
+            echo "Tag $actual does not match package version $expected"
+            exit 1
+          fi
+
   build:
+    needs: [validate-version]
+    if: always() && (needs.validate-version.result == 'success' || needs.validate-version.result == 'skipped')
     strategy:
       fail-fast: false
       matrix:
@@ -27,3 +52,22 @@ jobs:
           name: email-triage-${{ runner.os }}
           path: src-tauri/target/release/bundle/**
           if-no-files-found: error
+
+  publish-release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [validate-version, build]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: release-assets
+          merge-multiple: true
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: Email Triage ${{ github.ref_name }}
+          generate_release_notes: true
+          files: |
+            release-assets/**/*
+          fail_on_unmatched_files: true
