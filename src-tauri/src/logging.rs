@@ -7,7 +7,7 @@ use std::{
 use chrono::Local;
 use tauri::{AppHandle, Manager};
 
-use crate::models::{AppConfig, ProcessingResult, ProcessingStatus};
+use crate::models::{ProcessingResult, ProcessingStatus};
 
 const LOG_FILE: &str = "email-triage.log";
 const ROTATED_LOG_FILE: &str = "email-triage.log.1";
@@ -57,39 +57,24 @@ pub fn read_recent(app: &AppHandle, max_lines: usize) -> Result<Vec<String>, Str
     Ok(lines)
 }
 
-pub fn write_processing_results(
-    app: &AppHandle,
-    source: &str,
-    config: &AppConfig,
-    results: &[ProcessingResult],
-) {
+pub fn write_processing_results(app: &AppHandle, source: &str, results: &[ProcessingResult]) {
     if results.is_empty() {
         write(
             app,
             "INFO",
-            format!("source={source} mailbox_check new_messages=0"),
+            format!("source={source} mailbox_check candidate_messages=0"),
         );
         return;
     }
 
     for result in results {
-        let (level, status, destination) = match result.status {
-            ProcessingStatus::Uploaded => (
-                "INFO",
-                "uploaded",
-                Some(config.processed_mailbox.as_str()),
-            ),
-            ProcessingStatus::ProcessedNoAttachments => (
-                "INFO",
-                "processed_no_attachments",
-                Some(config.processed_mailbox.as_str()),
-            ),
-            ProcessingStatus::NeedsReview => (
-                "WARN",
-                "needs_review",
-                Some(config.review_mailbox.as_str()),
-            ),
-            ProcessingStatus::Failed => ("ERROR", "failed", None),
+        let (level, status, local_state) = match result.status {
+            ProcessingStatus::Uploaded => ("INFO", "uploaded", "completed"),
+            ProcessingStatus::ProcessedNoAttachments => {
+                ("INFO", "processed_no_attachments", "completed")
+            }
+            ProcessingStatus::NeedsReview => ("WARN", "needs_review", "needs_review"),
+            ProcessingStatus::Failed => ("ERROR", "failed", "retryable"),
         };
 
         let student = quoted(result.student_name.as_deref().unwrap_or("unknown"));
@@ -97,14 +82,13 @@ pub fn write_processing_results(
         let folder_id = quoted(result.folder_id.as_deref().unwrap_or("none"));
         let uploaded = quoted_list(&result.uploaded_file_names);
         let skipped = quoted_list(&result.skipped_existing_files);
-        let moved_to = quoted(destination.unwrap_or("not_moved"));
         let detail = quoted(&result.detail);
 
         write(
             app,
             level,
             format!(
-                "source={source} uid={} status={status} student={student} attachments={} folder={folder} folder_id={folder_id} uploaded={uploaded} skipped_existing={skipped} moved_to={moved_to} detail={detail}",
+                "source={source} uid={} status={status} student={student} attachments={} folder={folder} folder_id={folder_id} uploaded={uploaded} skipped_existing={skipped} local_state={local_state} mail_server_mutated=false detail={detail}",
                 result.uid, result.attachment_count
             ),
         );
@@ -114,7 +98,7 @@ pub fn write_processing_results(
         app,
         "INFO",
         format!(
-            "source={source} mailbox_check new_messages={} uploaded={} needs_review={} failed={}",
+            "source={source} mailbox_check candidate_messages={} uploaded={} needs_review={} failed={}",
             results.len(),
             results
                 .iter()
@@ -169,6 +153,9 @@ mod tests {
     #[test]
     fn quoted_values_are_single_line_and_escaped() {
         assert_eq!(quoted("a\\b\"c"), "\"a\\\\b\\\"c\"");
-        assert_eq!(quoted_list(&["a.pdf".into(), "b.docx".into()]), "[\"a.pdf\",\"b.docx\"]");
+        assert_eq!(
+            quoted_list(&["a.pdf".into(), "b.docx".into()]),
+            "[\"a.pdf\",\"b.docx\"]"
+        );
     }
 }
