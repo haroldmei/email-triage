@@ -33,7 +33,9 @@ impl MailConfig {
             return Err(MailError::InvalidConfig("username is required".into()));
         }
         if self.port == 0 {
-            return Err(MailError::InvalidConfig("port must be greater than zero".into()));
+            return Err(MailError::InvalidConfig(
+                "port must be greater than zero".into(),
+            ));
         }
         if self.mailbox.trim().is_empty() {
             return Err(MailError::InvalidConfig("mailbox is required".into()));
@@ -203,6 +205,9 @@ mod tests {
             username: "user@example.com".into(),
             mailbox: "INBOX".into(),
         };
-        assert!(matches!(config.validate(), Err(MailError::InvalidConfig(_))));
+        assert!(matches!(
+            config.validate(),
+            Err(MailError::InvalidConfig(_))
+        ));
     }
 }
