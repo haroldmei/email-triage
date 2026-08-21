@@ -71,8 +71,6 @@ pub struct AppConfig {
     pub google_email: Option<String>,
     pub drive_root_id: Option<String>,
     pub poll_interval_seconds: u64,
-    pub processed_mailbox: String,
-    pub review_mailbox: String,
 }
 
 impl Default for AppConfig {
@@ -83,8 +81,6 @@ impl Default for AppConfig {
             google_email: None,
             drive_root_id: None,
             poll_interval_seconds: 60,
-            processed_mailbox: "EmailTriage-Processed".to_string(),
-            review_mailbox: "EmailTriage-NeedsReview".to_string(),
         }
     }
 }
