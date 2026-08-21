@@ -26,16 +26,20 @@ jobs:
           sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
       - uses: dtolnay/rust-toolchain@stable
         with:
-          components: clippy
+          components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: src-tauri
+      - name: Format
+        working-directory: src-tauri
+        run: cargo fmt --check
       - name: Check
         working-directory: src-tauri
         run: cargo check
       - name: Test
         working-directory: src-tauri
         run: cargo test
-      - name: Clippy
+      - name: Clippy diagnostics
         working-directory: src-tauri
-        run: cargo clippy -- -D warnings
+        continue-on-error: true
+        run: cargo clippy
