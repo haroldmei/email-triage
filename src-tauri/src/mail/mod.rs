@@ -55,7 +55,9 @@ pub async fn validate_connection(config: &MailConfig, password: &str) -> Result<
     Ok(())
 }
 
-pub async fn fetch_candidate_messages(
+// Historical API name retained for compatibility. The implementation intentionally processes
+// both read and unread messages; source-mailbox membership is the processing state.
+pub async fn fetch_unseen_messages(
     config: &MailConfig,
     password: &str,
     limit: usize,
