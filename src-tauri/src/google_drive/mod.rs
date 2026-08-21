@@ -24,6 +24,7 @@ const GOOGLE_TOKEN_URL: &str = "https://oauth2.googleapis.com/token";
 const DRIVE_SCOPE: &str = "https://www.googleapis.com/auth/drive";
 const DRIVE_API: &str = "https://www.googleapis.com/drive/v3";
 const DRIVE_UPLOAD_API: &str = "https://www.googleapis.com/upload/drive/v3";
+const TRIAGE_PROPERTY: &str = "emailTriageKey";
 
 #[derive(Debug, Error)]
 pub enum GoogleDriveError {
@@ -111,7 +112,7 @@ pub async fn connect_google(client_id: &str) -> Result<GoogleConnection, GoogleD
     open::that(auth_url.as_str()).map_err(|e| GoogleDriveError::Browser(e.to_string()))?;
 
     let (code, returned_state) = receive_oauth_callback(listener).await?;
-    if returned_state != *csrf.secret() {
+    if returned_state != csrf.secret().as_str() {
         return Err(GoogleDriveError::OAuthStateMismatch);
     }
 
@@ -274,20 +275,36 @@ impl DriveClient {
     }
 
     pub async fn list_folders(&self, parent_id: &str) -> Result<Vec<DriveFile>, GoogleDriveError> {
-        let escaped_parent = parent_id.replace('\'', "\\'");
+        let parent = escape_query(parent_id);
         let query = format!(
-            "'{escaped_parent}' in parents and mimeType='application/vnd.google-apps.folder' and trashed=false"
+            "'{parent}' in parents and mimeType='application/vnd.google-apps.folder' and trashed=false"
         );
-        let mut page_token: Option<String> = None;
-        let mut folders = Vec::new();
+        self.list_query(&query).await
+    }
 
+    pub async fn find_by_triage_key(
+        &self,
+        parent_id: &str,
+        triage_key: &str,
+    ) -> Result<Vec<DriveFile>, GoogleDriveError> {
+        let parent = escape_query(parent_id);
+        let key = escape_query(triage_key);
+        let query = format!(
+            "'{parent}' in parents and appProperties has {{ key='{TRIAGE_PROPERTY}' and value='{key}' }} and trashed=false"
+        );
+        self.list_query(&query).await
+    }
+
+    async fn list_query(&self, query: &str) -> Result<Vec<DriveFile>, GoogleDriveError> {
+        let mut page_token: Option<String> = None;
+        let mut files = Vec::new();
         loop {
             let mut request = self
                 .http
                 .get(format!("{DRIVE_API}/files"))
                 .bearer_auth(&self.access_token)
                 .query(&[
-                    ("q", query.as_str()),
+                    ("q", query),
                     ("fields", "nextPageToken,files(id,name,mimeType,parents)"),
                     ("pageSize", "1000"),
                     ("supportsAllDrives", "true"),
@@ -305,58 +322,37 @@ impl DriveClient {
                 .json()
                 .await
                 .map_err(|e| GoogleDriveError::Api(e.to_string()))?;
-            folders.extend(page.files);
+            files.extend(page.files);
             page_token = page.next_page_token;
             if page_token.is_none() {
                 break;
             }
         }
-        Ok(folders)
-    }
-
-    pub async fn find_files_named(
-        &self,
-        parent_id: &str,
-        filename: &str,
-    ) -> Result<Vec<DriveFile>, GoogleDriveError> {
-        let parent = parent_id.replace('\'', "\\'");
-        let name = filename.replace('\'', "\\'");
-        let query = format!("'{parent}' in parents and name='{name}' and trashed=false");
-        let response = self
-            .http
-            .get(format!("{DRIVE_API}/files"))
-            .bearer_auth(&self.access_token)
-            .query(&[
-                ("q", query.as_str()),
-                ("fields", "files(id,name,mimeType,parents)"),
-                ("supportsAllDrives", "true"),
-                ("includeItemsFromAllDrives", "true"),
-            ])
-            .send()
-            .await
-            .map_err(|e| GoogleDriveError::Api(e.to_string()))?;
-        let response = ensure_success(response).await?;
-        let page: DriveFileList = response
-            .json()
-            .await
-            .map_err(|e| GoogleDriveError::Api(e.to_string()))?;
-        Ok(page.files)
+        Ok(files)
     }
 
     pub async fn upload_attachment(
         &self,
         folder_id: &str,
         attachment: &Attachment,
+        triage_key: &str,
     ) -> Result<DriveFile, GoogleDriveError> {
         let metadata = serde_json::json!({
             "name": attachment.filename,
-            "parents": [folder_id]
+            "parents": [folder_id],
+            "appProperties": {
+                TRIAGE_PROPERTY: triage_key
+            }
         });
         let initiation = self
             .http
             .post(format!("{DRIVE_UPLOAD_API}/files"))
             .bearer_auth(&self.access_token)
-            .query(&[("uploadType", "resumable"), ("supportsAllDrives", "true")])
+            .query(&[
+                ("uploadType", "resumable"),
+                ("supportsAllDrives", "true"),
+                ("fields", "id,name,mimeType,parents"),
+            ])
             .header("X-Upload-Content-Type", &attachment.content_type)
             .header("X-Upload-Content-Length", attachment.bytes.len())
             .json(&metadata)
@@ -374,7 +370,6 @@ impl DriveClient {
         let upload = self
             .http
             .put(location)
-            .bearer_auth(&self.access_token)
             .header(header::CONTENT_TYPE, &attachment.content_type)
             .header(header::CONTENT_LENGTH, attachment.bytes.len())
             .body(attachment.bytes.clone())
@@ -387,6 +382,10 @@ impl DriveClient {
             .await
             .map_err(|e| GoogleDriveError::Api(e.to_string()))
     }
+}
+
+fn escape_query(value: &str) -> String {
+    value.replace('\\', "\\\\").replace('\'', "\\'")
 }
 
 async fn ensure_success(response: reqwest::Response) -> Result<reqwest::Response, GoogleDriveError> {
@@ -410,5 +409,10 @@ mod tests {
         .unwrap();
         assert_eq!(file.id, "1");
         assert_eq!(file.name, "Chang Rui");
+    }
+
+    #[test]
+    fn query_values_are_escaped() {
+        assert_eq!(escape_query("a'b\\c"), "a\\'b\\\\c");
     }
 }
