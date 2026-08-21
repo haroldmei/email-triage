@@ -50,6 +50,7 @@ jobs:
     runs-on: ${{ matrix.os }}
     env:
       VITE_GOOGLE_CLIENT_ID: ${{ vars.GOOGLE_OAUTH_CLIENT_ID }}
+      GOOGLE_OAUTH_CLIENT_SECRET: ${{ secrets.GOOGLE_OAUTH_CLIENT_SECRET }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -57,7 +58,7 @@ jobs:
           node-version: 22
       - uses: dtolnay/rust-toolchain@stable
       - name: Verify Google OAuth configuration
-        run: node -e "if (!process.env.VITE_GOOGLE_CLIENT_ID || !process.env.VITE_GOOGLE_CLIENT_ID.trim()) { console.error('Repository variable GOOGLE_OAUTH_CLIENT_ID is required for release builds'); process.exit(1); }"
+        run: node -e "if (!process.env.VITE_GOOGLE_CLIENT_ID || !process.env.VITE_GOOGLE_CLIENT_ID.trim() || !process.env.GOOGLE_OAUTH_CLIENT_SECRET || !process.env.GOOGLE_OAUTH_CLIENT_SECRET.trim()) { console.error('GOOGLE_OAUTH_CLIENT_ID and GOOGLE_OAUTH_CLIENT_SECRET are required for release builds'); process.exit(1); }"
       - run: npm install
       - run: npm run tauri icon src-tauri/icons/icon.png
       - run: npm run tauri build
