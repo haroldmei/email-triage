@@ -149,8 +149,12 @@ pub async fn move_message(
             .try_collect()
             .await
             .map_err(|e| MailError::Imap(e.to_string()))?;
-        session
+        let expunged = session
             .expunge()
+            .await
+            .map_err(|e| MailError::Imap(e.to_string()))?;
+        let _: Vec<_> = expunged
+            .try_collect()
             .await
             .map_err(|e| MailError::Imap(e.to_string()))?;
     }
