@@ -68,13 +68,29 @@ pub fn start(app: AppHandle) {
                 continue;
             };
             if !is_ready(&cfg) {
-                logging::write(&app, "INFO", "source=background mailbox_check skipped reason=setup_incomplete");
+                logging::write(
+                    &app,
+                    "INFO",
+                    "source=background mailbox_check skipped reason=setup_incomplete",
+                );
                 continue;
             }
 
+            let mailbox = cfg
+                .mail
+                .as_ref()
+                .map(|mail| mail.mailbox.as_str())
+                .unwrap_or("unknown");
             let gate = app.state::<ProcessingGate>().inner().clone();
             let Some(_lease) = try_enter(&gate, "background") else {
-                logging::write(&app, "INFO", "source=background mailbox_check skipped reason=processing_already_running");
+                let active_source = current_source(&gate).unwrap_or_else(|| "unknown".into());
+                logging::write(
+                    &app,
+                    "INFO",
+                    format!(
+                        "source=background mailbox_check mailbox=\"{mailbox}\" skipped reason=processing_already_running active_source={active_source}"
+                    ),
+                );
                 continue;
             };
 
@@ -82,7 +98,7 @@ pub fn start(app: AppHandle) {
                 &app,
                 "INFO",
                 format!(
-                    "source=background mailbox_check started poll_interval_seconds={}",
+                    "source=background mailbox_check mailbox=\"{mailbox}\" started poll_interval_seconds={}",
                     cfg.poll_interval_seconds
                 ),
             );
@@ -93,12 +109,16 @@ pub fn start(app: AppHandle) {
                 Ok(Err(error)) => logging::write(
                     &app,
                     "ERROR",
-                    format!("source=background mailbox_check failed error=\"{error}\""),
+                    format!(
+                        "source=background mailbox_check mailbox=\"{mailbox}\" failed error=\"{error}\""
+                    ),
                 ),
                 Err(_) => logging::write(
                     &app,
                     "ERROR",
-                    "source=background mailbox_check timed_out seconds=120",
+                    format!(
+                        "source=background mailbox_check mailbox=\"{mailbox}\" timed_out seconds=120"
+                    ),
                 ),
             }
         }
