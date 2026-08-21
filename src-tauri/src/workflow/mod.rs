@@ -66,8 +66,6 @@ pub async fn process_once(
         .get(MAIL_SERVICE, &mail_config.username)
         .map_err(|e| WorkflowError::Credential(e.to_string()))?;
 
-    // Discover mail candidates before contacting Drive. This keeps idle polls cheap and makes
-    // mailbox diagnostics independent of transient Google OAuth/Drive failures.
     let listing = mail::list_message_uids(mail_config, &password)
         .await
         .map_err(|e| WorkflowError::Mail(e.to_string()))?;
@@ -97,14 +95,6 @@ pub async fn process_once(
         return Ok(Vec::new());
     }
 
-    let drive = client_from_stored_refresh_token(google_client_id, google_email)
-        .await
-        .map_err(|e| WorkflowError::Drive(e.to_string()))?;
-    let folders = drive
-        .list_folders(root_id)
-        .await
-        .map_err(|e| WorkflowError::Drive(e.to_string()))?;
-
     let messages = mail::fetch_messages_by_uid(
         mail_config,
         &password,
@@ -114,9 +104,41 @@ pub async fn process_once(
     .await
     .map_err(|e| WorkflowError::Mail(e.to_string()))?;
 
-    let mut results = Vec::with_capacity(messages.len());
+    // Parse first so messages without attachments can be completed locally without requiring Drive.
+    let mut parsed = Vec::with_capacity(messages.len());
+    let mut results = Vec::new();
     for fetched in messages {
-        let result = process_message(&drive, &folders, fetched).await;
+        match parse_message(&fetched.raw) {
+            Ok(message) if message.attachments.is_empty() => {
+                results.push(no_attachment_result(fetched.uid, message));
+            }
+            Ok(message) => parsed.push((fetched, message)),
+            Err(error) => results.push(review_result(
+                fetched.uid,
+                None,
+                None,
+                None,
+                0,
+                format!("Could not parse message: {error}"),
+            )),
+        }
+    }
+
+    if !parsed.is_empty() {
+        let drive = client_from_stored_refresh_token(google_client_id, google_email)
+            .await
+            .map_err(|e| WorkflowError::Drive(e.to_string()))?;
+        let folders = drive
+            .list_folders(root_id)
+            .await
+            .map_err(|e| WorkflowError::Drive(e.to_string()))?;
+        for (fetched, message) in parsed {
+            results.push(process_parsed_message(&drive, &folders, fetched, message).await);
+        }
+    }
+
+    results.sort_by_key(|result| result.uid);
+    for result in &results {
         if !matches!(result.status, ProcessingStatus::Failed) {
             local_state::mark_terminal(
                 app,
@@ -127,32 +149,36 @@ pub async fn process_once(
             )
             .map_err(WorkflowError::LocalState)?;
         }
-        results.push(result);
     }
     Ok(results)
 }
 
-async fn process_message(
+fn no_attachment_result(uid: u32, message: ParsedMessage) -> ProcessingResult {
+    let identity = DeterministicExtractor.extract(&message);
+    let student_name = preferred_student_name(&identity).map(|value| value.value.clone());
+    ProcessingResult {
+        uid,
+        message_id: message.message_id,
+        subject: message.subject,
+        student_name,
+        folder_id: None,
+        folder_name: None,
+        attachment_count: 0,
+        uploaded_file_ids: Vec::new(),
+        uploaded_file_names: Vec::new(),
+        skipped_existing_files: Vec::new(),
+        status: ProcessingStatus::ProcessedNoAttachments,
+        detail: "No attachments found; source email left unchanged".into(),
+    }
+}
+
+async fn process_parsed_message(
     drive: &DriveClient,
     folders: &[DriveFile],
     fetched: FetchedMessage,
+    message: ParsedMessage,
 ) -> ProcessingResult {
     let raw_digest = Sha256::digest(&fetched.raw);
-
-    let message = match parse_message(&fetched.raw) {
-        Ok(message) => message,
-        Err(error) => {
-            return review_result(
-                fetched.uid,
-                None,
-                None,
-                None,
-                0,
-                format!("Could not parse message: {error}"),
-            );
-        }
-    };
-
     let identity = DeterministicExtractor.extract(&message);
     let student_name = preferred_student_name(&identity).map(|value| value.value.clone());
     let attachment_count = message.attachments.len();
@@ -239,11 +265,6 @@ async fn process_message(
         }
     }
 
-    let status = if message.attachments.is_empty() {
-        ProcessingStatus::ProcessedNoAttachments
-    } else {
-        ProcessingStatus::Uploaded
-    };
     ProcessingResult {
         uid: fetched.uid,
         message_id: message.message_id,
@@ -255,7 +276,7 @@ async fn process_message(
         uploaded_file_ids,
         uploaded_file_names,
         skipped_existing_files,
-        status,
+        status: ProcessingStatus::Uploaded,
         detail: "Processing completed; source email left unchanged".into(),
     }
 }
@@ -456,6 +477,20 @@ mod tests {
             match_student_folder(&folders, &identity),
             FolderMatch::Ambiguous(values) if values.len() == 2
         ));
+    }
+
+    #[test]
+    fn no_attachment_message_is_terminal_without_folder_match() {
+        let result = no_attachment_result(
+            7,
+            ParsedMessage {
+                subject: Some("FYI".into()),
+                ..Default::default()
+            },
+        );
+        assert_eq!(result.status, ProcessingStatus::ProcessedNoAttachments);
+        assert_eq!(result.attachment_count, 0);
+        assert!(result.folder_id.is_none());
     }
 
     #[test]
