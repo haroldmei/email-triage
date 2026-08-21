@@ -135,8 +135,28 @@ async fn process_now(
         return Err(format!("Email processing is already running ({source})"));
     };
 
-    logging::write(&app, "INFO", "source=manual mailbox_check started");
-    let app_config = config::load(&app).map_err(|e| e.to_string())?;
+    let app_config = match config::load(&app) {
+        Ok(config) => config,
+        Err(error) => {
+            logging::write(
+                &app,
+                "ERROR",
+                format!("source=manual configuration_load failed error=\"{error}\""),
+            );
+            return Err(error.to_string());
+        }
+    };
+    let mailbox = app_config
+        .mail
+        .as_ref()
+        .map(|mail| mail.mailbox.as_str())
+        .unwrap_or("unknown");
+    logging::write(
+        &app,
+        "INFO",
+        format!("source=manual mailbox_check mailbox=\"{mailbox}\" started"),
+    );
+
     let result = timeout(Duration::from_secs(120), workflow::process_once(&app_config, 100)).await;
     match result {
         Ok(Ok(results)) => {
@@ -144,11 +164,23 @@ async fn process_now(
             Ok(results)
         }
         Ok(Err(error)) => {
-            logging::write(&app, "ERROR", format!("source=manual mailbox_check failed error=\"{error}\""));
+            logging::write(
+                &app,
+                "ERROR",
+                format!(
+                    "source=manual mailbox_check mailbox=\"{mailbox}\" failed error=\"{error}\""
+                ),
+            );
             Err(error.to_string())
         }
         Err(_) => {
-            logging::write(&app, "ERROR", "source=manual mailbox_check timed_out seconds=120");
+            logging::write(
+                &app,
+                "ERROR",
+                format!(
+                    "source=manual mailbox_check mailbox=\"{mailbox}\" timed_out seconds=120"
+                ),
+            );
             Err("Email processing timed out after 120 seconds. Check the local app log for the last completed stage.".into())
         }
     }
@@ -222,7 +254,11 @@ pub fn run() {
                 MacosLauncher::LaunchAgent,
                 None,
             ))?;
-            logging::write(app.handle(), "INFO", "Email Triage started");
+            logging::write(
+                app.handle(),
+                "INFO",
+                "Email Triage started processing_state=idle",
+            );
             setup_tray(app)?;
             scheduler::start(app.handle().clone());
             Ok(())
