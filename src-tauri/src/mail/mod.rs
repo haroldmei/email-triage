@@ -1,6 +1,6 @@
 pub mod parser;
 
-use std::time::Duration;
+use std::{fmt::Display, future::Future, time::Duration};
 
 use async_imap::Client;
 use async_native_tls::TlsConnector;
@@ -10,12 +10,15 @@ use tokio::{net::TcpStream, time::timeout};
 
 use crate::models::{FetchedMessage, MailConfig};
 
+const NETWORK_TIMEOUT: Duration = Duration::from_secs(15);
+const IMAP_COMMAND_TIMEOUT: Duration = Duration::from_secs(30);
+
 #[derive(Debug, Error)]
 pub enum MailError {
     #[error("invalid mail configuration: {0}")]
     InvalidConfig(String),
-    #[error("connection timed out")]
-    Timeout,
+    #[error("operation timed out: {0}")]
+    Timeout(&'static str),
     #[error("network error: {0}")]
     Network(String),
     #[error("TLS error: {0}")]
@@ -47,14 +50,8 @@ impl MailConfig {
 pub async fn validate_connection(config: &MailConfig, password: &str) -> Result<(), MailError> {
     config.validate()?;
     let mut session = connect(config, password).await?;
-    session
-        .select(&config.mailbox)
-        .await
-        .map_err(|e| MailError::Imap(e.to_string()))?;
-    session
-        .logout()
-        .await
-        .map_err(|e| MailError::Imap(e.to_string()))?;
+    imap_op("select mailbox", session.select(&config.mailbox)).await?;
+    imap_op("logout", session.logout()).await?;
     Ok(())
 }
 
@@ -69,15 +66,9 @@ pub async fn fetch_unseen_messages(
     }
 
     let mut session = connect(config, password).await?;
-    session
-        .select(&config.mailbox)
-        .await
-        .map_err(|e| MailError::Imap(e.to_string()))?;
+    imap_op("select mailbox", session.select(&config.mailbox)).await?;
 
-    let unseen = session
-        .uid_search("UNSEEN")
-        .await
-        .map_err(|e| MailError::Imap(e.to_string()))?;
+    let unseen = imap_op("search UNSEEN", session.uid_search("UNSEEN")).await?;
 
     let mut ids: Vec<u32> = unseen.into_iter().collect();
     ids.sort_unstable();
@@ -88,16 +79,15 @@ pub async fn fetch_unseen_messages(
     let mut result = Vec::with_capacity(ids.len());
     for uid in ids {
         let raw = {
-            // PEEK is intentional: merely reading a message must not set the IMAP \\Seen flag.
+            // PEEK is intentional: merely reading a message must not set the IMAP \Seen flag.
             // A crash before Drive upload should therefore leave the message eligible for retry.
-            let mut stream = session
-                .uid_fetch(uid.to_string(), "BODY.PEEK[]")
-                .await
-                .map_err(|e| MailError::Imap(e.to_string()))?;
-            let fetch = stream
-                .try_next()
-                .await
-                .map_err(|e| MailError::Imap(e.to_string()))?
+            let mut stream = imap_op(
+                "start message fetch",
+                session.uid_fetch(uid.to_string(), "BODY.PEEK[]"),
+            )
+            .await?;
+            let fetch = imap_op("read message fetch", stream.try_next())
+                .await?
                 .ok_or_else(|| MailError::Imap(format!("message UID {uid} was not returned")))?;
             fetch
                 .body()
@@ -107,10 +97,7 @@ pub async fn fetch_unseen_messages(
         result.push(FetchedMessage { uid, raw });
     }
 
-    session
-        .logout()
-        .await
-        .map_err(|e| MailError::Imap(e.to_string()))?;
+    imap_op("logout", session.logout()).await?;
     Ok(result)
 }
 
@@ -127,42 +114,32 @@ pub async fn move_message(
     }
 
     let mut session = connect(config, password).await?;
-    session
-        .select(&config.mailbox)
-        .await
-        .map_err(|e| MailError::Imap(e.to_string()))?;
+    imap_op("select mailbox", session.select(&config.mailbox)).await?;
 
     // CREATE returning NO normally means the mailbox already exists. The move/copy below
     // is authoritative and will still fail if the mailbox is genuinely unavailable.
-    let _ = session.create(destination).await;
+    let _ = timeout(IMAP_COMMAND_TIMEOUT, session.create(destination)).await;
 
-    if session.uid_mv(uid.to_string(), destination).await.is_err() {
-        session
-            .uid_copy(uid.to_string(), destination)
-            .await
-            .map_err(|e| MailError::Imap(e.to_string()))?;
-        let updates = session
-            .uid_store(uid.to_string(), "+FLAGS.SILENT (\\Deleted)")
-            .await
-            .map_err(|e| MailError::Imap(e.to_string()))?;
-        let _: Vec<_> = updates
-            .try_collect()
-            .await
-            .map_err(|e| MailError::Imap(e.to_string()))?;
-        let expunged = session
-            .expunge()
-            .await
-            .map_err(|e| MailError::Imap(e.to_string()))?;
-        let _: Vec<_> = expunged
-            .try_collect()
-            .await
-            .map_err(|e| MailError::Imap(e.to_string()))?;
+    if imap_op("move message", session.uid_mv(uid.to_string(), destination))
+        .await
+        .is_err()
+    {
+        imap_op(
+            "copy message",
+            session.uid_copy(uid.to_string(), destination),
+        )
+        .await?;
+        let updates = imap_op(
+            "mark source message deleted",
+            session.uid_store(uid.to_string(), "+FLAGS.SILENT (\\Deleted)"),
+        )
+        .await?;
+        let _: Vec<_> = imap_op("collect store response", updates.try_collect()).await?;
+        let expunged = imap_op("expunge deleted message", session.expunge()).await?;
+        let _: Vec<_> = imap_op("collect expunge response", expunged.try_collect()).await?;
     }
 
-    session
-        .logout()
-        .await
-        .map_err(|e| MailError::Imap(e.to_string()))?;
+    imap_op("logout", session.logout()).await?;
     Ok(())
 }
 
@@ -171,30 +148,42 @@ async fn connect(
     password: &str,
 ) -> Result<async_imap::Session<async_native_tls::TlsStream<TcpStream>>, MailError> {
     let address = format!("{}:{}", config.host, config.port);
-    let tcp = timeout(Duration::from_secs(15), TcpStream::connect(&address))
+    let tcp = timeout(NETWORK_TIMEOUT, TcpStream::connect(&address))
         .await
-        .map_err(|_| MailError::Timeout)?
+        .map_err(|_| MailError::Timeout("TCP connect"))?
         .map_err(|e| MailError::Network(e.to_string()))?;
 
     let tls = timeout(
-        Duration::from_secs(15),
+        NETWORK_TIMEOUT,
         TlsConnector::new().connect(config.host.as_str(), tcp),
     )
     .await
-    .map_err(|_| MailError::Timeout)?
+    .map_err(|_| MailError::Timeout("TLS handshake"))?
     .map_err(|e| MailError::Tls(e.to_string()))?;
 
     let mut client = Client::new(tls);
-    client
-        .read_response()
-        .await
-        .map_err(|e| MailError::Imap(e.to_string()))?
+    imap_op("server greeting", client.read_response())
+        .await?
         .ok_or_else(|| MailError::Imap("server closed connection before greeting".into()))?;
 
-    client
-        .login(config.username.as_str(), password)
+    timeout(
+        IMAP_COMMAND_TIMEOUT,
+        client.login(config.username.as_str(), password),
+    )
+    .await
+    .map_err(|_| MailError::Timeout("login"))?
+    .map_err(|(e, _)| MailError::Imap(e.to_string()))
+}
+
+async fn imap_op<T, E, F>(stage: &'static str, future: F) -> Result<T, MailError>
+where
+    F: Future<Output = Result<T, E>>,
+    E: Display,
+{
+    timeout(IMAP_COMMAND_TIMEOUT, future)
         .await
-        .map_err(|(e, _)| MailError::Imap(e.to_string()))
+        .map_err(|_| MailError::Timeout(stage))?
+        .map_err(|e| MailError::Imap(e.to_string()))
 }
 
 #[cfg(test)]
