@@ -51,9 +51,10 @@ impl IdentityExtractor for DeterministicExtractor {
             }
         }
 
-        let name = english_name
+        // Chinese is the canonical student name. English is only a fallback.
+        let name = chinese_name
             .clone()
-            .or_else(|| chinese_name.clone())
+            .or_else(|| english_name.clone())
             .or(generic_name);
 
         StudentIdentity {
@@ -241,12 +242,13 @@ mod tests {
     }
 
     #[test]
-    fn extracts_bilingual_names_from_message() {
+    fn prefers_chinese_name_when_both_are_present() {
         let message = ParsedMessage {
             text_body: "Student Name: 常瑞 / Chang Rui".into(),
             ..Default::default()
         };
         let identity = DeterministicExtractor.extract(&message);
+        assert_eq!(identity.name.as_ref().unwrap().value, "常瑞");
         assert_eq!(identity.chinese_name.unwrap().value, "常瑞");
         assert_eq!(identity.english_name.unwrap().value, "Chang Rui");
     }
@@ -265,6 +267,7 @@ mod tests {
             ..Default::default()
         };
         let identity = DeterministicExtractor.extract(&message);
+        assert_eq!(identity.name.as_ref().unwrap().value, "常瑞");
         assert_eq!(identity.chinese_name.unwrap().value, "常瑞");
         assert_eq!(identity.english_name.unwrap().value, "Chang Rui");
         assert_eq!(identity.application_id.unwrap().value, "APP9988");
