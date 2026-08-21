@@ -53,7 +53,10 @@ pub struct ExtractedValue {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct StudentIdentity {
+    /// Best available name retained for backwards compatibility and display.
     pub name: Option<ExtractedValue>,
+    pub english_name: Option<ExtractedValue>,
+    pub chinese_name: Option<ExtractedValue>,
     pub application_id: Option<ExtractedValue>,
     pub date_of_birth: Option<ExtractedValue>,
     pub university: Option<ExtractedValue>,
