@@ -24,6 +24,12 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: npm install
+      - name: Generate Tauri platform icons
+        run: npm run tauri icon src-tauri/icons/icon.png
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
