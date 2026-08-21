@@ -164,7 +164,7 @@ fn setup_tray(app: &tauri::App) -> tauri::Result<()> {
 
     let mut builder = TrayIconBuilder::new()
         .menu(&menu)
-        .menu_on_left_click(false)
+        .show_menu_on_left_click(false)
         .tooltip("Email Triage")
         .on_menu_event(|app, event| match event.id.as_ref() {
             "show" => show_main_window(app),
