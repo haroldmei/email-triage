@@ -107,6 +107,7 @@ pub struct ProcessingResult {
     pub student_name: Option<String>,
     pub folder_id: Option<String>,
     pub folder_name: Option<String>,
+    pub attachment_count: usize,
     pub uploaded_file_ids: Vec<String>,
     #[serde(default)]
     pub uploaded_file_names: Vec<String>,
