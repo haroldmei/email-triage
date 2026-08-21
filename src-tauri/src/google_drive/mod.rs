@@ -1,8 +1,8 @@
 use std::time::Duration;
 
 use oauth2::{
-    basic::BasicClient, AuthorizationCode, AuthUrl, ClientId, CsrfToken, PkceCodeChallenge,
-    RedirectUrl, RefreshToken, Scope, TokenResponse, TokenUrl,
+    basic::BasicClient, AuthorizationCode, AuthUrl, ClientId, ClientSecret, CsrfToken,
+    PkceCodeChallenge, RedirectUrl, RefreshToken, Scope, TokenResponse, TokenUrl,
 };
 use reqwest::{header, Client as HttpClient};
 use serde::{Deserialize, Serialize};
@@ -170,6 +170,13 @@ fn oauth_client(
     >,
     GoogleDriveError,
 > {
+    let client_secret = option_env!("GOOGLE_OAUTH_CLIENT_SECRET")
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| {
+            GoogleDriveError::OAuthConfig(
+                "Google desktop OAuth client secret is not configured in this build".into(),
+            )
+        })?;
     let auth = AuthUrl::new(GOOGLE_AUTH_URL.to_string())
         .map_err(|e| GoogleDriveError::OAuthConfig(e.to_string()))?;
     let token = TokenUrl::new(GOOGLE_TOKEN_URL.to_string())
@@ -177,6 +184,7 @@ fn oauth_client(
     let redirect = RedirectUrl::new(redirect_uri.to_string())
         .map_err(|e| GoogleDriveError::OAuthConfig(e.to_string()))?;
     Ok(BasicClient::new(ClientId::new(client_id.to_string()))
+        .set_client_secret(ClientSecret::new(client_secret.to_string()))
         .set_auth_uri(auth)
         .set_token_uri(token)
         .set_redirect_uri(redirect))
