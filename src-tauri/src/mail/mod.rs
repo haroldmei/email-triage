@@ -55,7 +55,7 @@ pub async fn validate_connection(config: &MailConfig, password: &str) -> Result<
     Ok(())
 }
 
-pub async fn fetch_unseen_messages(
+pub async fn fetch_candidate_messages(
     config: &MailConfig,
     password: &str,
     limit: usize,
@@ -68,19 +68,17 @@ pub async fn fetch_unseen_messages(
     let mut session = connect(config, password).await?;
     imap_op("select mailbox", session.select(&config.mailbox)).await?;
 
-    let unseen = imap_op("search UNSEEN", session.uid_search("UNSEEN")).await?;
-
-    let mut ids: Vec<u32> = unseen.into_iter().collect();
-    ids.sort_unstable();
-    if ids.len() > limit {
-        ids = ids.split_off(ids.len() - limit);
-    }
+    // Read/unread state belongs to the user's mail client and must not determine whether
+    // Email Triage processes a message. Anything still in the configured source mailbox is
+    // eligible; successfully handled messages are moved out to Processed or NeedsReview.
+    let all = imap_op("search ALL", session.uid_search("ALL")).await?;
+    let ids = select_latest_uids(all.into_iter().collect(), limit);
 
     let mut result = Vec::with_capacity(ids.len());
     for uid in ids {
         let raw = {
             // PEEK is intentional: merely reading a message must not set the IMAP \Seen flag.
-            // A crash before Drive upload should therefore leave the message eligible for retry.
+            // A crash before Drive upload therefore leaves the message eligible for retry.
             let mut stream = imap_op(
                 "start message fetch",
                 session.uid_fetch(uid.to_string(), "BODY.PEEK[]"),
@@ -99,6 +97,15 @@ pub async fn fetch_unseen_messages(
 
     imap_op("logout", session.logout()).await?;
     Ok(result)
+}
+
+fn select_latest_uids(mut ids: Vec<u32>, limit: usize) -> Vec<u32> {
+    ids.sort_unstable();
+    if ids.len() > limit {
+        ids.split_off(ids.len() - limit)
+    } else {
+        ids
+    }
 }
 
 pub async fn move_message(
@@ -202,5 +209,15 @@ mod tests {
             config.validate(),
             Err(MailError::InvalidConfig(_))
         ));
+    }
+
+    #[test]
+    fn selects_latest_uids_in_ascending_order() {
+        assert_eq!(select_latest_uids(vec![8, 2, 10, 4], 3), vec![4, 8, 10]);
+    }
+
+    #[test]
+    fn keeps_all_uids_when_under_limit() {
+        assert_eq!(select_latest_uids(vec![3, 1, 2], 10), vec![1, 2, 3]);
     }
 }
