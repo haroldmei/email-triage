@@ -10,15 +10,17 @@ Google access tokens are short-lived and kept in process memory. The refresh tok
 
 ## Student matching
 
-Automatic upload requires one unique high-confidence folder match. Application/student identifiers are preferred over names. If a name maps to multiple folders, or the extractor cannot establish a sufficiently strong identity, the email is routed to the review mailbox without uploading any attachment.
+Automatic upload requires one unique high-confidence folder match. Chinese student names are preferred when available; English is a fallback. If a name maps to multiple folders, or the extractor cannot establish a sufficiently strong identity, the message is recorded locally as **Needs Review** and no attachment is uploaded.
 
 ## Attachments
 
-MIME filenames are validated before use. Path separators, traversal filenames, and null-containing names are rejected. Drive uploads carry an application property containing a deterministic per-message attachment key. This allows retries after crashes or mail-move failures without creating duplicate files.
+MIME filenames are validated before use. Path separators, traversal filenames, and null-containing names are rejected. Drive uploads carry an application property containing a deterministic per-message attachment key. This allows retries after crashes without creating duplicate files.
 
-## Email state
+## Mail-server safety and processing state
 
-The workflow uses stable IMAP UIDs within the selected mailbox. A message is moved to the Processed mailbox only after all required Drive work succeeds. Failures remain retryable. Ambiguous messages are moved to Needs Review.
+Email Triage treats the configured mailbox as **read-only** for processing. It may authenticate, select the mailbox, search message UIDs, and fetch message content with IMAP `BODY.PEEK[]`. It does not create mail folders, move or copy messages, delete messages, expunge messages, set flags, or change read/unread state.
+
+Read and unread messages are both eligible. Processing state is stored only on the local machine in `processing-state.json` under the Tauri application config directory. Entries are scoped by mail server, account, mailbox, IMAP `UIDVALIDITY`, and UID so a server-side UID reset cannot accidentally reuse stale local state. Successful, no-attachment, and needs-review outcomes are terminal locally; failures remain retryable.
 
 ## Network boundaries
 
@@ -26,4 +28,4 @@ The desktop app communicates directly with the configured mail server, Google OA
 
 ## Logging
 
-Never log raw email bodies, attachment contents, mailbox passwords, OAuth tokens, or full student records. Operational errors should contain only enough metadata to diagnose the failure.
+Never log raw email bodies, attachment contents, mailbox passwords, OAuth tokens, or full student records. Operational errors should contain only enough metadata to diagnose the failure. Logs explicitly report that mail-server mutation is disabled.
