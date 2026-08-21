@@ -7,7 +7,8 @@ use crate::{
     google_drive::{client_from_stored_refresh_token, DriveClient, DriveFile},
     mail::{self, parser::parse_message},
     models::{
-        AppConfig, FetchedMessage, ParsedMessage, ProcessingResult, ProcessingStatus, StudentIdentity,
+        AppConfig, ExtractedValue, FetchedMessage, ParsedMessage, ProcessingResult,
+        ProcessingStatus, StudentIdentity,
     },
 };
 
@@ -30,7 +31,10 @@ pub enum FolderMatch {
     NotFound,
 }
 
-pub async fn process_once(config: &AppConfig, limit: usize) -> Result<Vec<ProcessingResult>, WorkflowError> {
+pub async fn process_once(
+    config: &AppConfig,
+    limit: usize,
+) -> Result<Vec<ProcessingResult>, WorkflowError> {
     let mail_config = config
         .mail
         .as_ref()
@@ -49,7 +53,9 @@ pub async fn process_once(config: &AppConfig, limit: usize) -> Result<Vec<Proces
         .drive_root_id
         .as_deref()
         .filter(|value| !value.trim().is_empty())
-        .ok_or(WorkflowError::IncompleteConfig("Google Drive student root folder"))?;
+        .ok_or(WorkflowError::IncompleteConfig(
+            "Google Drive student root folder",
+        ))?;
 
     let password = PlatformCredentialStore
         .get(MAIL_SERVICE, &mail_config.username)
@@ -67,9 +73,7 @@ pub async fn process_once(config: &AppConfig, limit: usize) -> Result<Vec<Proces
 
     let mut results = Vec::with_capacity(messages.len());
     for fetched in messages {
-        results.push(
-            process_message(config, &password, &drive, &folders, fetched).await,
-        );
+        results.push(process_message(config, &password, &drive, &folders, fetched).await);
     }
     Ok(results)
 }
@@ -101,7 +105,7 @@ async fn process_message(
     };
 
     let identity = DeterministicExtractor.extract(&message);
-    let student_name = identity.name.as_ref().map(|value| value.value.clone());
+    let student_name = preferred_student_name(&identity).map(|value| value.value.clone());
 
     let folder = match match_student_folder(folders, &identity) {
         FolderMatch::Matched(folder) => folder,
@@ -274,37 +278,39 @@ fn failed_result(
     }
 }
 
-pub fn match_student_folder(folders: &[DriveFile], identity: &StudentIdentity) -> FolderMatch {
-    if let Some(application_id) = identity.application_id.as_ref() {
-        if application_id.confidence >= 0.95 {
-            let needle = normalize(&application_id.value);
-            if !needle.is_empty() {
-                let matches = folders
-                    .iter()
-                    .filter(|folder| normalize(&folder.name).contains(&needle))
-                    .cloned()
-                    .collect::<Vec<_>>();
-                match matches.len() {
-                    1 => return FolderMatch::Matched(matches[0].clone()),
-                    2.. => return FolderMatch::Ambiguous(matches),
-                    _ => {}
-                }
-            }
-        }
-    }
+/// Returns the single name used as the Google Drive student-folder key.
+/// Chinese is preferred whenever available; English is a fallback only.
+fn preferred_student_name(identity: &StudentIdentity) -> Option<&ExtractedValue> {
+    identity
+        .chinese_name
+        .as_ref()
+        .filter(|value| value.confidence >= 0.9)
+        .or_else(|| {
+            identity
+                .english_name
+                .as_ref()
+                .filter(|value| value.confidence >= 0.9)
+        })
+        .or_else(|| identity.name.as_ref().filter(|value| value.confidence >= 0.9))
+}
 
-    let Some(name) = identity.name.as_ref().filter(|name| name.confidence >= 0.9) else {
+pub fn match_student_folder(folders: &[DriveFile], identity: &StudentIdentity) -> FolderMatch {
+    let Some(name) = preferred_student_name(identity) else {
         return FolderMatch::NotFound;
     };
     let needle = normalize(&name.value);
     if needle.is_empty() {
         return FolderMatch::NotFound;
     }
+
+    // Student folders are named after the student. Use normalized exact matching,
+    // not substring matching, to avoid selecting another student's folder.
     let matches = folders
         .iter()
-        .filter(|folder| normalize(&folder.name).contains(&needle))
+        .filter(|folder| normalize(&folder.name) == needle)
         .cloned()
         .collect::<Vec<_>>();
+
     match matches.len() {
         0 => FolderMatch::NotFound,
         1 => FolderMatch::Matched(matches[0].clone()),
@@ -333,7 +339,6 @@ fn attachment_key(raw_digest: &[u8], filename: &[u8], bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::models::ExtractedValue;
 
     fn folder(id: &str, name: &str) -> DriveFile {
         DriveFile {
@@ -344,48 +349,80 @@ mod tests {
         }
     }
 
-    fn identity(name: &str, application_id: Option<&str>) -> StudentIdentity {
-        StudentIdentity {
-            name: Some(ExtractedValue {
-                value: name.into(),
-                confidence: 0.99,
-                evidence: "test".into(),
-            }),
-            application_id: application_id.map(|value| ExtractedValue {
-                value: value.into(),
-                confidence: 0.99,
-                evidence: "test".into(),
-            }),
-            ..Default::default()
+    fn extracted(value: &str) -> ExtractedValue {
+        ExtractedValue {
+            value: value.into(),
+            confidence: 0.99,
+            evidence: "test".into(),
         }
     }
 
     #[test]
-    fn matches_numeric_prefix_student_folder_by_name() {
-        let folders = vec![folder("1", "2654 Chang Rui"), folder("2", "Li Ming")];
+    fn chinese_name_is_preferred_over_english_name() {
+        let identity = StudentIdentity {
+            name: Some(extracted("常瑞")),
+            english_name: Some(extracted("Chang Rui")),
+            chinese_name: Some(extracted("常瑞")),
+            ..Default::default()
+        };
+        assert_eq!(preferred_student_name(&identity).unwrap().value, "常瑞");
+    }
+
+    #[test]
+    fn matches_chinese_student_folder_when_both_names_exist() {
+        let folders = vec![folder("1", "常瑞"), folder("2", "Chang Rui")];
+        let identity = StudentIdentity {
+            name: Some(extracted("常瑞")),
+            english_name: Some(extracted("Chang Rui")),
+            chinese_name: Some(extracted("常瑞")),
+            ..Default::default()
+        };
         assert!(matches!(
-            match_student_folder(&folders, &identity("Chang Rui", None)),
+            match_student_folder(&folders, &identity),
             FolderMatch::Matched(DriveFile { id, .. }) if id == "1"
         ));
     }
 
     #[test]
-    fn application_id_is_preferred_when_name_is_ambiguous() {
-        let folders = vec![
-            folder("1", "2654 Chang Rui APP123"),
-            folder("2", "3178 Chang Rui APP999"),
-        ];
+    fn falls_back_to_english_when_chinese_name_is_missing() {
+        let folders = vec![folder("1", "Chang Rui"), folder("2", "Li Ming")];
+        let identity = StudentIdentity {
+            name: Some(extracted("Chang Rui")),
+            english_name: Some(extracted("Chang Rui")),
+            chinese_name: None,
+            ..Default::default()
+        };
         assert!(matches!(
-            match_student_folder(&folders, &identity("Chang Rui", Some("APP999"))),
-            FolderMatch::Matched(DriveFile { id, .. }) if id == "2"
+            match_student_folder(&folders, &identity),
+            FolderMatch::Matched(DriveFile { id, .. }) if id == "1"
         ));
     }
 
     #[test]
-    fn duplicate_name_is_never_auto_selected() {
-        let folders = vec![folder("1", "2654 Chang Rui"), folder("2", "3178 Chang Rui")];
+    fn does_not_use_english_folder_when_chinese_name_exists() {
+        let folders = vec![folder("1", "Chang Rui")];
+        let identity = StudentIdentity {
+            name: Some(extracted("常瑞")),
+            english_name: Some(extracted("Chang Rui")),
+            chinese_name: Some(extracted("常瑞")),
+            ..Default::default()
+        };
         assert!(matches!(
-            match_student_folder(&folders, &identity("Chang Rui", None)),
+            match_student_folder(&folders, &identity),
+            FolderMatch::NotFound
+        ));
+    }
+
+    #[test]
+    fn duplicate_student_folder_name_is_never_auto_selected() {
+        let folders = vec![folder("1", "常瑞"), folder("2", "常瑞")];
+        let identity = StudentIdentity {
+            name: Some(extracted("常瑞")),
+            chinese_name: Some(extracted("常瑞")),
+            ..Default::default()
+        };
+        assert!(matches!(
+            match_student_folder(&folders, &identity),
             FolderMatch::Ambiguous(values) if values.len() == 2
         ));
     }

@@ -45,8 +45,8 @@ h2 { margin: 0; font-size: 22px; letter-spacing: -.02em; }
 .form { display: grid; gap: 15px; padding-top: 20px; }
 .form label, .automationSettings label { display: grid; gap: 7px; color: #454540; font-size: 13px; font-weight: 700; }
 .form small { color: #777770; font-weight: 400; line-height: 1.4; }
-input, select { width: 100%; border: 1px solid #d2d2cb; border-radius: 10px; padding: 10px 11px; background: #fff; color: #161616; outline: none; }
-input:focus, select:focus { border-color: #77776f; box-shadow: 0 0 0 3px rgba(0,0,0,.05); }
+input:not([type="checkbox"]), select { width: 100%; border: 1px solid #d2d2cb; border-radius: 10px; padding: 10px 11px; background: #fff; color: #161616; outline: none; }
+input:not([type="checkbox"]):focus, select:focus { border-color: #77776f; box-shadow: 0 0 0 3px rgba(0,0,0,.05); }
 .twoCol { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
 button { border: 1px solid #d3d3cc; border-radius: 10px; padding: 9px 12px; background: #f8f8f5; color: #282825; }
 button:hover:not(:disabled) { background: #f0f0eb; }
@@ -66,6 +66,8 @@ button.primary:hover:not(:disabled) { background: #2d2d2a; }
 .automationPanel { margin-top: 20px; }
 .automationSettings { display: flex; align-items: end; justify-content: space-between; gap: 20px; padding: 18px 0; }
 .automationSettings label { width: 180px; }
+.automationSettings .toggleLabel { display: flex; width: auto; min-width: 220px; flex-direction: row; align-items: center; justify-content: space-between; gap: 12px; border: 1px solid #e5e5df; border-radius: 10px; padding: 10px 12px; }
+.toggleLabel input[type="checkbox"] { width: 18px; height: 18px; accent-color: #161616; }
 .automationSettings p { margin: 0; color: #65655f; font-size: 13px; }
 .metrics { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; padding: 2px 0 18px; }
 .metric { border: 1px solid #e5e5df; border-radius: 12px; padding: 13px; }
@@ -91,5 +93,5 @@ button.primary:hover:not(:disabled) { background: #2d2d2a; }
   .shell { width: min(100% - 28px, 1120px); padding: 34px 0; }
   .twoCol { grid-template-columns: 1fr; }
   .panelHeader, .automationSettings { flex-direction: column; align-items: stretch; }
-  .automationSettings label { width: 100%; }
+  .automationSettings label, .automationSettings .toggleLabel { width: 100%; }
 }
