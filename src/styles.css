@@ -63,7 +63,7 @@ button.primary:hover:not(:disabled) { background: #2d2d2a; }
 .folderList button:hover { background: #f5f5f1; }
 .muted { margin: 5px 0; color: #777770; font-size: 12px; line-height: 1.4; }
 
-.automationPanel { margin-top: 20px; }
+.automationPanel, .logPanel { margin-top: 20px; }
 .automationSettings { display: flex; align-items: end; justify-content: space-between; gap: 20px; padding: 18px 0; }
 .automationSettings label { width: 180px; }
 .automationSettings .toggleLabel { display: flex; width: auto; min-width: 220px; flex-direction: row; align-items: center; justify-content: space-between; gap: 12px; border: 1px solid #e5e5df; border-radius: 10px; padding: 10px 12px; }
@@ -82,6 +82,25 @@ button.primary:hover:not(:disabled) { background: #2d2d2a; }
 .pill.needsReview { background: #fff7e2; color: #76520b; }
 .pill.failed { background: #fff0ef; color: #8d2721; }
 .pill.processedNoAttachments { background: #f0f1f8; color: #424d7a; }
+
+.logMeta { display: flex; justify-content: space-between; gap: 12px; flex-wrap: wrap; padding: 14px 0 10px; color: #777770; font-size: 12px; }
+.logMeta span:last-child { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.logViewer {
+  margin: 0;
+  min-height: 180px;
+  max-height: 420px;
+  overflow: auto;
+  border: 1px solid #2d2d2a;
+  border-radius: 12px;
+  padding: 14px;
+  background: #171715;
+  color: #e8e8e2;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+  font-size: 12px;
+  line-height: 1.55;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
 
 @media (max-width: 860px) {
   .grid { grid-template-columns: 1fr; }
