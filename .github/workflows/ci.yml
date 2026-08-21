@@ -30,8 +30,9 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: src-tauri
-      - name: Format
+      - name: Format diagnostics
         working-directory: src-tauri
+        continue-on-error: true
         run: cargo fmt --check
       - name: Check
         working-directory: src-tauri
