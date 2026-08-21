@@ -72,7 +72,12 @@ fn strip_html(html: &str) -> String {
 fn capture(text: &str, pattern: &str, evidence: &str, confidence: f32) -> Option<ExtractedValue> {
     let re = Regex::new(pattern).expect("constant extraction regex");
     let captures = re.captures(text)?;
-    let value = captures.get(1)?.as_str().trim().trim_matches(['\"', '\'']).to_string();
+    let value = captures
+        .get(1)?
+        .as_str()
+        .trim()
+        .trim_matches(['\"', '\''])
+        .to_string();
     if value.is_empty() {
         return None;
     }
