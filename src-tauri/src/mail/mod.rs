@@ -57,7 +57,7 @@ impl MailConfig {
 pub async fn validate_connection(config: &MailConfig, password: &str) -> Result<(), MailError> {
     config.validate()?;
     let mut session = connect(config, password).await?;
-    imap_op("select mailbox", session.select(&config.mailbox)).await?;
+    imap_op("examine mailbox", session.examine(&config.mailbox)).await?;
     imap_op("logout", session.logout()).await?;
     Ok(())
 }
@@ -68,9 +68,9 @@ pub async fn list_message_uids(
 ) -> Result<MailboxListing, MailError> {
     config.validate()?;
     let mut session = connect(config, password).await?;
-    let mailbox = imap_op("select mailbox", session.select(&config.mailbox)).await?;
+    let mailbox = imap_op("examine mailbox", session.examine(&config.mailbox)).await?;
     let uid_validity = mailbox.uid_validity.ok_or_else(|| {
-        MailError::Imap("selected mailbox did not report UIDVALIDITY".into())
+        MailError::Imap("examined mailbox did not report UIDVALIDITY".into())
     })?;
 
     // ALL intentionally includes both read and unread messages. Processing state is local-only.
@@ -98,7 +98,7 @@ pub async fn fetch_messages_by_uid(
     }
 
     let mut session = connect(config, password).await?;
-    let mailbox = imap_op("select mailbox", session.select(&config.mailbox)).await?;
+    let mailbox = imap_op("examine mailbox", session.examine(&config.mailbox)).await?;
     if mailbox.uid_validity != Some(expected_uid_validity) {
         return Err(MailError::Imap(
             "mailbox UIDVALIDITY changed during processing; retry the mailbox check".into(),
