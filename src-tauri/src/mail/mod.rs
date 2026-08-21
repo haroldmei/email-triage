@@ -86,8 +86,10 @@ pub async fn fetch_unseen_messages(
     let mut result = Vec::with_capacity(ids.len());
     for uid in ids {
         let raw = {
+            // PEEK is intentional: merely reading a message must not set the IMAP \\Seen flag.
+            // A crash before Drive upload should therefore leave the message eligible for retry.
             let mut stream = session
-                .uid_fetch(uid.to_string(), "RFC822")
+                .uid_fetch(uid.to_string(), "BODY.PEEK[]")
                 .await
                 .map_err(|e| MailError::Imap(e.to_string()))?;
             let fetch = stream
@@ -98,7 +100,7 @@ pub async fn fetch_unseen_messages(
             fetch
                 .body()
                 .map(ToOwned::to_owned)
-                .ok_or_else(|| MailError::Imap(format!("message UID {uid} had no RFC822 body")))?
+                .ok_or_else(|| MailError::Imap(format!("message UID {uid} had no message body")))?
         };
         result.push(FetchedMessage { uid, raw });
     }
