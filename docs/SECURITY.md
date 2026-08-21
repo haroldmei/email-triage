@@ -18,7 +18,7 @@ MIME filenames are validated before use. Path separators, traversal filenames, a
 
 ## Mail-server safety and processing state
 
-Email Triage treats the configured mailbox as **read-only** for processing. It may authenticate, select the mailbox, search message UIDs, and fetch message content with IMAP `BODY.PEEK[]`. It does not create mail folders, move or copy messages, delete messages, expunge messages, set flags, or change read/unread state.
+Email Triage treats the configured mailbox as **read-only** for processing. It authenticates and opens the mailbox with IMAP `EXAMINE`, searches message UIDs, and fetches message content with `BODY.PEEK[]`. It does not create mail folders, move or copy messages, delete messages, expunge messages, set flags, or change read/unread state.
 
 Read and unread messages are both eligible. Processing state is stored only on the local machine in `processing-state.json` under the Tauri application config directory. Entries are scoped by mail server, account, mailbox, IMAP `UIDVALIDITY`, and UID so a server-side UID reset cannot accidentally reuse stale local state. Successful, no-attachment, and needs-review outcomes are terminal locally; failures remain retryable.
 
