@@ -1,28 +1,58 @@
 use std::{
     sync::{
         atomic::{AtomicBool, Ordering},
-        Arc,
+        Arc, Mutex,
     },
     time::Duration,
 };
 
 use tauri::{AppHandle, Manager};
+use tokio::time::timeout;
 
-use crate::{config, workflow};
+use crate::{config, logging, workflow};
 
-pub type ProcessingGate = Arc<AtomicBool>;
+pub struct ProcessingState {
+    active: AtomicBool,
+    source: Mutex<Option<&'static str>>,
+}
+
+pub type ProcessingGate = Arc<ProcessingState>;
+
+pub struct ProcessingLease {
+    gate: ProcessingGate,
+}
+
+impl Drop for ProcessingLease {
+    fn drop(&mut self) {
+        self.gate.active.store(false, Ordering::Release);
+        if let Ok(mut source) = self.gate.source.lock() {
+            *source = None;
+        }
+    }
+}
 
 pub fn new_gate() -> ProcessingGate {
-    Arc::new(AtomicBool::new(false))
+    Arc::new(ProcessingState {
+        active: AtomicBool::new(false),
+        source: Mutex::new(None),
+    })
 }
 
-pub fn try_enter(gate: &ProcessingGate) -> bool {
-    gate.compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-        .is_ok()
+pub fn try_enter(gate: &ProcessingGate, source: &'static str) -> Option<ProcessingLease> {
+    gate.active
+        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+        .ok()?;
+    if let Ok(mut current) = gate.source.lock() {
+        *current = Some(source);
+    }
+    Some(ProcessingLease { gate: gate.clone() })
 }
 
-pub fn leave(gate: &ProcessingGate) {
-    gate.store(false, Ordering::Release);
+pub fn current_source(gate: &ProcessingGate) -> Option<String> {
+    gate.source
+        .lock()
+        .ok()
+        .and_then(|value| value.map(ToOwned::to_owned))
 }
 
 pub fn start(app: AppHandle) {
@@ -41,14 +71,27 @@ pub fn start(app: AppHandle) {
             }
 
             let gate = app.state::<ProcessingGate>().inner().clone();
-            if !try_enter(&gate) {
+            let Some(_lease) = try_enter(&gate, "background") else {
                 continue;
-            }
-            let result = workflow::process_once(&cfg, 100).await;
-            leave(&gate);
+            };
 
-            if let Err(error) = result {
-                eprintln!("email-triage background run failed: {error}");
+            logging::write(&app, "INFO", "background processing started");
+            match timeout(Duration::from_secs(120), workflow::process_once(&cfg, 100)).await {
+                Ok(Ok(results)) => logging::write(
+                    &app,
+                    "INFO",
+                    format!("background processing completed: {} message(s)", results.len()),
+                ),
+                Ok(Err(error)) => logging::write(
+                    &app,
+                    "ERROR",
+                    format!("background processing failed: {error}"),
+                ),
+                Err(_) => logging::write(
+                    &app,
+                    "ERROR",
+                    "background processing timed out after 120 seconds",
+                ),
             }
         }
     });
@@ -75,11 +118,13 @@ mod tests {
     use super::*;
 
     #[test]
-    fn gate_prevents_parallel_runs() {
+    fn gate_prevents_parallel_runs_and_reports_source() {
         let gate = new_gate();
-        assert!(try_enter(&gate));
-        assert!(!try_enter(&gate));
-        leave(&gate);
-        assert!(try_enter(&gate));
+        let lease = try_enter(&gate, "manual").expect("first run should enter");
+        assert_eq!(current_source(&gate).as_deref(), Some("manual"));
+        assert!(try_enter(&gate, "background").is_none());
+        drop(lease);
+        assert!(current_source(&gate).is_none());
+        assert!(try_enter(&gate, "background").is_some());
     }
 }
