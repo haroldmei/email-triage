@@ -98,11 +98,11 @@ fn save(app: &AppHandle, ledger: &ProcessingLedger) -> Result<(), String> {
     }
     let bytes = serde_json::to_vec_pretty(ledger)
         .map_err(|e| format!("could not serialize local processing state: {e}"))?;
-    let temp = path.with_extension("json.tmp");
-    fs::write(&temp, bytes)
-        .map_err(|e| format!("could not write local processing state: {e}"))?;
-    fs::rename(&temp, &path)
-        .map_err(|e| format!("could not replace local processing state: {e}"))
+
+    // There is only one processor at a time (guarded by ProcessingGate), so a direct replace
+    // avoids Windows rename-over-existing-file behavior while keeping this small ledger simple.
+    fs::write(&path, bytes)
+        .map_err(|e| format!("could not write local processing state {}: {e}", path.display()))
 }
 
 fn message_key(mail: &MailConfig, uid_validity: u32, uid: u32) -> String {
