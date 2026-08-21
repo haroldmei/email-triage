@@ -61,7 +61,8 @@ pub struct StudentIdentity {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]\pub struct AppConfig {
+#[serde(rename_all = "camelCase")]
+pub struct AppConfig {
     pub mail: Option<MailConfig>,
     pub google_client_id: Option<String>,
     pub google_email: Option<String>,
