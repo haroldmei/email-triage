@@ -12,11 +12,13 @@
   "app": {
     "windows": [
       {
+        "label": "main",
         "title": "Email Triage",
         "width": 1080,
         "height": 760,
         "minWidth": 760,
-        "minHeight": 560
+        "minHeight": 560,
+        "center": true
       }
     ],
     "security": {
@@ -24,7 +26,10 @@
     }
   },
   "bundle": {
-    "active": false,
-    "targets": "all"
+    "active": true,
+    "targets": "all",
+    "publisher": "Email Triage",
+    "shortDescription": "Local-first student email attachment triage",
+    "longDescription": "Reads configured enterprise email, identifies students, and files attachments into the correct Google Drive folder with conservative review handling."
   }
 }

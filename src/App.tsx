@@ -64,14 +64,16 @@ export default function App() {
     { id: 'root', name: 'My Drive' },
   ]);
   const [results, setResults] = useState<ProcessingResult[]>([]);
+  const [autostart, setAutostartState] = useState(false);
   const [busy, setBusy] = useState<string | null>(null);
   const [notice, setNotice] = useState<string>('');
   const [error, setError] = useState<string>('');
 
   useEffect(() => {
-    invoke<AppConfig>('get_config')
-      .then((saved) => {
+    Promise.all([invoke<AppConfig>('get_config'), invoke<boolean>('get_autostart')])
+      .then(([saved, autostartEnabled]) => {
         setConfig(saved);
+        setAutostartState(autostartEnabled);
         if (saved.mail) setMail(saved.mail);
         if (saved.googleClientId) setGoogleClientId(saved.googleClientId);
       })
@@ -172,6 +174,17 @@ export default function App() {
       return reloadConfig();
     });
     if (saved) setNotice(`Background polling set to every ${seconds} seconds.`);
+  }
+
+  async function toggleAutostart(enabled: boolean) {
+    const changed = await runAction('autostart', async () => {
+      await invoke('set_autostart', { enabled });
+      return invoke<boolean>('get_autostart');
+    });
+    if (changed !== undefined) {
+      setAutostartState(changed);
+      setNotice(changed ? 'Email Triage will start automatically after login.' : 'Autostart disabled.');
+    }
   }
 
   async function processNow() {
@@ -359,9 +372,18 @@ export default function App() {
               <option value={900}>15 minutes</option>
             </select>
           </label>
+          <label className="toggleLabel">
+            <span>Start automatically after login</span>
+            <input
+              type="checkbox"
+              checked={autostart}
+              disabled={Boolean(busy)}
+              onChange={(e) => toggleAutostart(e.target.checked)}
+            />
+          </label>
           <p>
-            Success → <strong>{config.processedMailbox}</strong> · Ambiguous →{' '}
-            <strong>{config.reviewMailbox}</strong>
+            Closing the window keeps Email Triage running in the system tray. Success →{' '}
+            <strong>{config.processedMailbox}</strong> · Ambiguous → <strong>{config.reviewMailbox}</strong>
           </p>
         </div>
 
