@@ -56,6 +56,8 @@ jobs:
         with:
           node-version: 22
       - uses: dtolnay/rust-toolchain@stable
+      - name: Verify Google OAuth configuration
+        run: node -e "if (!process.env.VITE_GOOGLE_CLIENT_ID || !process.env.VITE_GOOGLE_CLIENT_ID.trim()) { console.error('Repository variable GOOGLE_OAUTH_CLIENT_ID is required for release builds'); process.exit(1); }"
       - run: npm install
       - run: npm run tauri icon src-tauri/icons/icon.png
       - run: npm run tauri build
