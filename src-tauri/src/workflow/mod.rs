@@ -1,10 +1,12 @@
 use sha2::{Digest, Sha256};
+use tauri::AppHandle;
 use thiserror::Error;
 
 use crate::{
     credentials::{CredentialStore, PlatformCredentialStore, MAIL_SERVICE},
     extraction::{DeterministicExtractor, IdentityExtractor},
     google_drive::{client_from_stored_refresh_token, DriveClient, DriveFile},
+    local_state, logging,
     mail::{self, parser::parse_message},
     models::{
         AppConfig, ExtractedValue, FetchedMessage, ParsedMessage, ProcessingResult,
@@ -22,6 +24,8 @@ pub enum WorkflowError {
     Mail(String),
     #[error("Google Drive error: {0}")]
     Drive(String),
+    #[error("local processing state error: {0}")]
+    LocalState(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -32,6 +36,7 @@ pub enum FolderMatch {
 }
 
 pub async fn process_once(
+    app: &AppHandle,
     config: &AppConfig,
     limit: usize,
 ) -> Result<Vec<ProcessingResult>, WorkflowError> {
@@ -67,41 +72,77 @@ pub async fn process_once(
         .list_folders(root_id)
         .await
         .map_err(|e| WorkflowError::Drive(e.to_string()))?;
-    let messages = mail::fetch_unseen_messages(mail_config, &password, limit)
+
+    let listing = mail::list_message_uids(mail_config, &password)
         .await
         .map_err(|e| WorkflowError::Mail(e.to_string()))?;
+    let (pending_uids, skipped_local) = local_state::select_pending_uids(
+        app,
+        mail_config,
+        listing.uid_validity,
+        &listing.uids,
+        limit,
+    )
+    .map_err(WorkflowError::LocalState)?;
+
+    logging::write(
+        app,
+        "INFO",
+        format!(
+            "mailbox_scan mailbox=\"{}\" total_messages={} known_local={} candidate_messages={} uid_validity={}",
+            mail_config.mailbox,
+            listing.total_messages,
+            skipped_local,
+            pending_uids.len(),
+            listing.uid_validity
+        ),
+    );
+
+    let messages = mail::fetch_messages_by_uid(
+        mail_config,
+        &password,
+        listing.uid_validity,
+        &pending_uids,
+    )
+    .await
+    .map_err(|e| WorkflowError::Mail(e.to_string()))?;
 
     let mut results = Vec::with_capacity(messages.len());
     for fetched in messages {
-        results.push(process_message(config, &password, &drive, &folders, fetched).await);
+        let result = process_message(&drive, &folders, fetched).await;
+        if !matches!(result.status, ProcessingStatus::Failed) {
+            local_state::mark_terminal(
+                app,
+                mail_config,
+                listing.uid_validity,
+                result.uid,
+                &result.status,
+            )
+            .map_err(WorkflowError::LocalState)?;
+        }
+        results.push(result);
     }
     Ok(results)
 }
 
 async fn process_message(
-    config: &AppConfig,
-    password: &str,
     drive: &DriveClient,
     folders: &[DriveFile],
     fetched: FetchedMessage,
 ) -> ProcessingResult {
-    let mail_config = config.mail.as_ref().expect("validated by process_once");
     let raw_digest = Sha256::digest(&fetched.raw);
 
     let message = match parse_message(&fetched.raw) {
         Ok(message) => message,
         Err(error) => {
             return review_result(
-                config,
-                password,
                 fetched.uid,
                 None,
                 None,
                 None,
                 0,
                 format!("Could not parse message: {error}"),
-            )
-            .await;
+            );
         }
     };
 
@@ -113,8 +154,6 @@ async fn process_message(
         FolderMatch::Matched(folder) => folder,
         FolderMatch::Ambiguous(candidates) => {
             return review_result(
-                config,
-                password,
                 fetched.uid,
                 message.message_id.clone(),
                 message.subject.clone(),
@@ -129,21 +168,17 @@ async fn process_message(
                         .collect::<Vec<_>>()
                         .join(", ")
                 ),
-            )
-            .await;
+            );
         }
         FolderMatch::NotFound => {
             return review_result(
-                config,
-                password,
                 fetched.uid,
                 message.message_id.clone(),
                 message.subject.clone(),
                 student_name,
                 attachment_count,
                 "No unique student folder match was found".into(),
-            )
-            .await;
+            );
         }
     };
 
@@ -197,28 +232,6 @@ async fn process_message(
         }
     }
 
-    if let Err(error) = mail::move_message(
-        mail_config,
-        password,
-        fetched.uid,
-        &config.processed_mailbox,
-    )
-    .await
-    {
-        return failed_result(
-            fetched.uid,
-            &message,
-            student_name,
-            Some(folder.id),
-            Some(folder.name),
-            attachment_count,
-            uploaded_file_ids,
-            uploaded_file_names,
-            skipped_existing_files,
-            format!("Files are safe in Drive, but moving the source email failed: {error}"),
-        );
-    }
-
     let status = if message.attachments.is_empty() {
         ProcessingStatus::ProcessedNoAttachments
     } else {
@@ -236,13 +249,11 @@ async fn process_message(
         uploaded_file_names,
         skipped_existing_files,
         status,
-        detail: "Processing completed".into(),
+        detail: "Processing completed; source email left unchanged".into(),
     }
 }
 
-async fn review_result(
-    config: &AppConfig,
-    password: &str,
+fn review_result(
     uid: u32,
     message_id: Option<String>,
     subject: Option<String>,
@@ -250,36 +261,19 @@ async fn review_result(
     attachment_count: usize,
     detail: String,
 ) -> ProcessingResult {
-    let mail_config = config.mail.as_ref().expect("validated by process_once");
-    match mail::move_message(mail_config, password, uid, &config.review_mailbox).await {
-        Ok(()) => ProcessingResult {
-            uid,
-            message_id,
-            subject,
-            student_name,
-            folder_id: None,
-            folder_name: None,
-            attachment_count,
-            uploaded_file_ids: Vec::new(),
-            uploaded_file_names: Vec::new(),
-            skipped_existing_files: Vec::new(),
-            status: ProcessingStatus::NeedsReview,
-            detail,
-        },
-        Err(error) => ProcessingResult {
-            uid,
-            message_id,
-            subject,
-            student_name,
-            folder_id: None,
-            folder_name: None,
-            attachment_count,
-            uploaded_file_ids: Vec::new(),
-            uploaded_file_names: Vec::new(),
-            skipped_existing_files: Vec::new(),
-            status: ProcessingStatus::Failed,
-            detail: format!("{detail}; could not route to review mailbox: {error}"),
-        },
+    ProcessingResult {
+        uid,
+        message_id,
+        subject,
+        student_name,
+        folder_id: None,
+        folder_name: None,
+        attachment_count,
+        uploaded_file_ids: Vec::new(),
+        uploaded_file_names: Vec::new(),
+        skipped_existing_files: Vec::new(),
+        status: ProcessingStatus::NeedsReview,
+        detail: format!("{detail}; source email left unchanged"),
     }
 }
 
@@ -312,8 +306,6 @@ fn failed_result(
     }
 }
 
-/// Returns the single name used as the Google Drive student-folder key.
-/// Chinese is preferred whenever available; English is a fallback only.
 fn preferred_student_name(identity: &StudentIdentity) -> Option<&ExtractedValue> {
     identity
         .chinese_name
@@ -337,8 +329,6 @@ pub fn match_student_folder(folders: &[DriveFile], identity: &StudentIdentity) -
         return FolderMatch::NotFound;
     }
 
-    // Student folders are named after the student. Use normalized exact matching,
-    // not substring matching, to avoid selecting another student's folder.
     let matches = folders
         .iter()
         .filter(|folder| normalize(&folder.name) == needle)
