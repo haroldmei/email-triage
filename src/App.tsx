@@ -68,6 +68,7 @@ export default function App() {
   const [results, setResults] = useState<ProcessingResult[]>([]);
   const [logLines, setLogLines] = useState<string[]>([]);
   const [logPath, setLogPath] = useState('');
+  const [processingStatePath, setProcessingStatePath] = useState('');
   const [autostart, setAutostartState] = useState(false);
   const [busy, setBusy] = useState<string | null>(null);
   const [notice, setNotice] = useState<string>('');
@@ -86,6 +87,9 @@ export default function App() {
   useEffect(() => {
     refreshLogs();
     invoke<string>('get_log_path').then(setLogPath).catch(() => undefined);
+    invoke<string>('get_processing_state_path')
+      .then(setProcessingStatePath)
+      .catch(() => undefined);
     const timer = window.setInterval(refreshLogs, 2000);
     return () => window.clearInterval(timer);
   }, []);
@@ -218,7 +222,7 @@ export default function App() {
     if (processed) {
       setResults(processed);
       await refreshLogs();
-      setNotice(`Processed ${processed.length} new message${processed.length === 1 ? '' : 's'}.`);
+      setNotice(`Processed ${processed.length} candidate message${processed.length === 1 ? '' : 's'}.`);
     }
   }
 
@@ -229,8 +233,8 @@ export default function App() {
           <p className="eyebrow">Email Triage</p>
           <h1>Route student attachments from email to Google Drive.</h1>
           <p className="lede">
-            Local-first automation. Ambiguous student matches are held for review instead of being
-            filed into the wrong folder.
+            Local-first automation with read-only mailbox access. Email Triage never moves,
+            deletes, flags, or otherwise changes messages on the mail server.
           </p>
         </div>
         <div className={`readiness ${ready ? 'ready' : ''}`}>
@@ -303,6 +307,10 @@ export default function App() {
                 placeholder={config.mail ? 'Enter only to reconnect' : ''}
               />
             </label>
+            <small>
+              Mail access is read-only: both read and unread messages may be inspected, but their
+              location and read/unread state are never changed.
+            </small>
             <button className="primary" disabled={Boolean(busy)}>
               {busy === 'mail' ? 'Testing…' : 'Save and test connection'}
             </button>
@@ -399,8 +407,8 @@ export default function App() {
             />
           </label>
           <p>
-            Closing the window keeps Email Triage running in the system tray. Success →{' '}
-            <strong>{config.processedMailbox}</strong> · Ambiguous → <strong>{config.reviewMailbox}</strong>
+            Closing the window keeps Email Triage running in the system tray. Mail stays untouched
+            on the server; completed and review state is kept only on this computer.
           </p>
         </div>
 
@@ -443,6 +451,9 @@ export default function App() {
         <div className="logMeta">
           <span>UI refreshes every 2 seconds. Mailbox checks run every {config.pollIntervalSeconds} seconds.</span>
           {logPath && <span title={logPath}>Log file: {logPath}</span>}
+          {processingStatePath && (
+            <span title={processingStatePath}>Local processing state: {processingStatePath}</span>
+          )}
         </div>
         <pre className="logViewer" aria-live="polite">
           {logLines.length > 0

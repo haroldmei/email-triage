@@ -2,6 +2,7 @@ pub mod config;
 pub mod credentials;
 pub mod extraction;
 pub mod google_drive;
+pub mod local_state;
 pub mod logging;
 pub mod mail;
 pub mod models;
@@ -120,6 +121,11 @@ fn get_log_path(app: AppHandle) -> Result<String, String> {
 }
 
 #[tauri::command]
+fn get_processing_state_path(app: AppHandle) -> Result<String, String> {
+    local_state::state_path(&app).map(|path| path.display().to_string())
+}
+
+#[tauri::command]
 fn get_recent_logs(app: AppHandle, max_lines: usize) -> Result<Vec<String>, String> {
     logging::read_recent(&app, max_lines)
 }
@@ -135,20 +141,52 @@ async fn process_now(
         return Err(format!("Email processing is already running ({source})"));
     };
 
-    logging::write(&app, "INFO", "source=manual mailbox_check started");
-    let app_config = config::load(&app).map_err(|e| e.to_string())?;
-    let result = timeout(Duration::from_secs(120), workflow::process_once(&app_config, 100)).await;
+    let app_config = match config::load(&app) {
+        Ok(config) => config,
+        Err(error) => {
+            logging::write(
+                &app,
+                "ERROR",
+                format!("source=manual configuration_load failed error=\"{error}\""),
+            );
+            return Err(error.to_string());
+        }
+    };
+    let mailbox = app_config
+        .mail
+        .as_ref()
+        .map(|mail| mail.mailbox.as_str())
+        .unwrap_or("unknown");
+    logging::write(
+        &app,
+        "INFO",
+        format!("source=manual mailbox_check mailbox=\"{mailbox}\" started"),
+    );
+
+    let result = timeout(
+        Duration::from_secs(120),
+        workflow::process_once(&app, &app_config, 100),
+    )
+    .await;
     match result {
         Ok(Ok(results)) => {
-            logging::write_processing_results(&app, "manual", &app_config, &results);
+            logging::write_processing_results(&app, "manual", &results);
             Ok(results)
         }
         Ok(Err(error)) => {
-            logging::write(&app, "ERROR", format!("source=manual mailbox_check failed error=\"{error}\""));
+            logging::write(
+                &app,
+                "ERROR",
+                format!("source=manual mailbox_check mailbox=\"{mailbox}\" failed error=\"{error}\""),
+            );
             Err(error.to_string())
         }
         Err(_) => {
-            logging::write(&app, "ERROR", "source=manual mailbox_check timed_out seconds=120");
+            logging::write(
+                &app,
+                "ERROR",
+                format!("source=manual mailbox_check mailbox=\"{mailbox}\" timed_out seconds=120"),
+            );
             Err("Email processing timed out after 120 seconds. Check the local app log for the last completed stage.".into())
         }
     }
@@ -222,7 +260,14 @@ pub fn run() {
                 MacosLauncher::LaunchAgent,
                 None,
             ))?;
-            logging::write(app.handle(), "INFO", "Email Triage started");
+            let state_path = local_state::state_path(app.handle())
+                .map(|path| path.display().to_string())
+                .unwrap_or_else(|_| "unavailable".into());
+            logging::write(
+                app.handle(),
+                "INFO",
+                format!("Email Triage started processing_state=idle mail_access=read_only local_state=\"{state_path}\""),
+            );
             setup_tray(app)?;
             scheduler::start(app.handle().clone());
             Ok(())
@@ -242,6 +287,7 @@ pub fn run() {
             list_drive_folders,
             set_drive_root,
             get_log_path,
+            get_processing_state_path,
             get_recent_logs,
             process_now,
             get_autostart,

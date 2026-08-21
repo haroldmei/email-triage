@@ -10,6 +10,8 @@ Some Tencent Enterprise Email tenants require IMAP access to be enabled by an ad
 
 The password/authorization code is stored through the operating system credential store. It is not written to `config.json`.
 
+Email Triage uses the mailbox in read-only fashion for processing. It can inspect both read and unread messages, but it does not move, copy, delete, expunge, flag, or mark messages read. Your mailbox organization remains under your control.
+
 ## 2. Google Workspace / Drive
 
 A Google Cloud project must enable the Google Drive API and provide an OAuth 2.0 Desktop application client ID. For organisation-managed deployments, the client ID should normally be supplied to release builds through the `GOOGLE_OAUTH_CLIENT_ID` GitHub Actions variable so end users do not type it manually.
@@ -24,6 +26,6 @@ After login, browse to the folder that contains all student folders and choose *
 
 Choose the polling interval and optionally enable **Start automatically after login**. Closing the main window keeps the app running in the system tray.
 
-Successfully processed messages are moved to `EmailTriage-Processed`. Messages without a unique, high-confidence student match are moved to `EmailTriage-NeedsReview` and no attachment is uploaded.
+The application records terminal processing outcomes locally in `processing-state.json`. Successfully uploaded messages, messages with no attachments, and messages that need review are remembered locally so they are not repeatedly processed. Failed operations remain retryable. Nothing is moved or changed on the mail server as part of this state management.
 
-Use **Run now** during first setup to validate the workflow with a small number of representative emails before relying on background processing.
+Use **Run now** during first setup to validate the workflow with a small number of representative emails before relying on background processing. The live processing log shows the selected mailbox, total messages, locally known messages, candidate messages, attachment counts, and upload/review outcomes.

@@ -27,6 +27,13 @@ pub enum MailError {
     Imap(String),
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MailboxListing {
+    pub uid_validity: u32,
+    pub total_messages: u32,
+    pub uids: Vec<u32>,
+}
+
 impl MailConfig {
     pub fn validate(&self) -> Result<(), MailError> {
         if self.host.trim().is_empty() {
@@ -50,37 +57,58 @@ impl MailConfig {
 pub async fn validate_connection(config: &MailConfig, password: &str) -> Result<(), MailError> {
     config.validate()?;
     let mut session = connect(config, password).await?;
-    imap_op("select mailbox", session.select(&config.mailbox)).await?;
+    imap_op("examine mailbox", session.examine(&config.mailbox)).await?;
     imap_op("logout", session.logout()).await?;
     Ok(())
 }
 
-pub async fn fetch_unseen_messages(
+pub async fn list_message_uids(
     config: &MailConfig,
     password: &str,
-    limit: usize,
+) -> Result<MailboxListing, MailError> {
+    config.validate()?;
+    let mut session = connect(config, password).await?;
+    let mailbox = imap_op("examine mailbox", session.examine(&config.mailbox)).await?;
+    let uid_validity = mailbox.uid_validity.ok_or_else(|| {
+        MailError::Imap("examined mailbox did not report UIDVALIDITY".into())
+    })?;
+
+    // ALL intentionally includes both read and unread messages. Processing state is local-only.
+    let all = imap_op("search ALL", session.uid_search("ALL")).await?;
+    let mut uids: Vec<u32> = all.into_iter().collect();
+    uids.sort_unstable();
+
+    imap_op("logout", session.logout()).await?;
+    Ok(MailboxListing {
+        uid_validity,
+        total_messages: mailbox.exists,
+        uids,
+    })
+}
+
+pub async fn fetch_messages_by_uid(
+    config: &MailConfig,
+    password: &str,
+    expected_uid_validity: u32,
+    uids: &[u32],
 ) -> Result<Vec<FetchedMessage>, MailError> {
     config.validate()?;
-    if limit == 0 {
+    if uids.is_empty() {
         return Ok(Vec::new());
     }
 
     let mut session = connect(config, password).await?;
-    imap_op("select mailbox", session.select(&config.mailbox)).await?;
-
-    let unseen = imap_op("search UNSEEN", session.uid_search("UNSEEN")).await?;
-
-    let mut ids: Vec<u32> = unseen.into_iter().collect();
-    ids.sort_unstable();
-    if ids.len() > limit {
-        ids = ids.split_off(ids.len() - limit);
+    let mailbox = imap_op("examine mailbox", session.examine(&config.mailbox)).await?;
+    if mailbox.uid_validity != Some(expected_uid_validity) {
+        return Err(MailError::Imap(
+            "mailbox UIDVALIDITY changed during processing; retry the mailbox check".into(),
+        ));
     }
 
-    let mut result = Vec::with_capacity(ids.len());
-    for uid in ids {
+    let mut result = Vec::with_capacity(uids.len());
+    for uid in uids {
         let raw = {
-            // PEEK is intentional: merely reading a message must not set the IMAP \Seen flag.
-            // A crash before Drive upload should therefore leave the message eligible for retry.
+            // BODY.PEEK[] is deliberate: it does not set the user's \\Seen flag.
             let mut stream = imap_op(
                 "start message fetch",
                 session.uid_fetch(uid.to_string(), "BODY.PEEK[]"),
@@ -94,53 +122,11 @@ pub async fn fetch_unseen_messages(
                 .map(ToOwned::to_owned)
                 .ok_or_else(|| MailError::Imap(format!("message UID {uid} had no message body")))?
         };
-        result.push(FetchedMessage { uid, raw });
+        result.push(FetchedMessage { uid: *uid, raw });
     }
 
     imap_op("logout", session.logout()).await?;
     Ok(result)
-}
-
-pub async fn move_message(
-    config: &MailConfig,
-    password: &str,
-    uid: u32,
-    destination: &str,
-) -> Result<(), MailError> {
-    if destination.trim().is_empty() {
-        return Err(MailError::InvalidConfig(
-            "destination mailbox is required".into(),
-        ));
-    }
-
-    let mut session = connect(config, password).await?;
-    imap_op("select mailbox", session.select(&config.mailbox)).await?;
-
-    // CREATE returning NO normally means the mailbox already exists. The move/copy below
-    // is authoritative and will still fail if the mailbox is genuinely unavailable.
-    let _ = timeout(IMAP_COMMAND_TIMEOUT, session.create(destination)).await;
-
-    if imap_op("move message", session.uid_mv(uid.to_string(), destination))
-        .await
-        .is_err()
-    {
-        imap_op(
-            "copy message",
-            session.uid_copy(uid.to_string(), destination),
-        )
-        .await?;
-        let updates = imap_op(
-            "mark source message deleted",
-            session.uid_store(uid.to_string(), "+FLAGS.SILENT (\\Deleted)"),
-        )
-        .await?;
-        let _: Vec<_> = imap_op("collect store response", updates.try_collect()).await?;
-        let expunged = imap_op("expunge deleted message", session.expunge()).await?;
-        let _: Vec<_> = imap_op("collect expunge response", expunged.try_collect()).await?;
-    }
-
-    imap_op("logout", session.logout()).await?;
-    Ok(())
 }
 
 async fn connect(
