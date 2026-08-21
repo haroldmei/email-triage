@@ -98,6 +98,7 @@ async fn process_message(
                 None,
                 None,
                 None,
+                0,
                 format!("Could not parse message: {error}"),
             )
             .await;
@@ -106,6 +107,7 @@ async fn process_message(
 
     let identity = DeterministicExtractor.extract(&message);
     let student_name = preferred_student_name(&identity).map(|value| value.value.clone());
+    let attachment_count = message.attachments.len();
 
     let folder = match match_student_folder(folders, &identity) {
         FolderMatch::Matched(folder) => folder,
@@ -117,6 +119,7 @@ async fn process_message(
                 message.message_id.clone(),
                 message.subject.clone(),
                 student_name,
+                attachment_count,
                 format!(
                     "Student match is ambiguous across {} folders: {}",
                     candidates.len(),
@@ -137,6 +140,7 @@ async fn process_message(
                 message.message_id.clone(),
                 message.subject.clone(),
                 student_name,
+                attachment_count,
                 "No unique student folder match was found".into(),
             )
             .await;
@@ -144,6 +148,7 @@ async fn process_message(
     };
 
     let mut uploaded_file_ids = Vec::new();
+    let mut uploaded_file_names = Vec::new();
     let mut skipped_existing_files = Vec::new();
 
     for attachment in &message.attachments {
@@ -160,7 +165,10 @@ async fn process_message(
                     &message,
                     student_name,
                     Some(folder.id.clone()),
+                    Some(folder.name.clone()),
+                    attachment_count,
                     uploaded_file_ids,
+                    uploaded_file_names,
                     skipped_existing_files,
                     format!("Could not check Drive idempotency key: {error}"),
                 );
@@ -168,14 +176,20 @@ async fn process_message(
         }
 
         match drive.upload_attachment(&folder.id, attachment, &key).await {
-            Ok(file) => uploaded_file_ids.push(file.id),
+            Ok(file) => {
+                uploaded_file_ids.push(file.id);
+                uploaded_file_names.push(attachment.filename.clone());
+            }
             Err(error) => {
                 return failed_result(
                     fetched.uid,
                     &message,
                     student_name,
                     Some(folder.id.clone()),
+                    Some(folder.name.clone()),
+                    attachment_count,
                     uploaded_file_ids,
+                    uploaded_file_names,
                     skipped_existing_files,
                     format!("Attachment upload failed: {error}"),
                 );
@@ -196,7 +210,10 @@ async fn process_message(
             &message,
             student_name,
             Some(folder.id),
+            Some(folder.name),
+            attachment_count,
             uploaded_file_ids,
+            uploaded_file_names,
             skipped_existing_files,
             format!("Files are safe in Drive, but moving the source email failed: {error}"),
         );
@@ -213,7 +230,10 @@ async fn process_message(
         subject: message.subject,
         student_name,
         folder_id: Some(folder.id),
+        folder_name: Some(folder.name),
+        attachment_count,
         uploaded_file_ids,
+        uploaded_file_names,
         skipped_existing_files,
         status,
         detail: "Processing completed".into(),
@@ -227,6 +247,7 @@ async fn review_result(
     message_id: Option<String>,
     subject: Option<String>,
     student_name: Option<String>,
+    attachment_count: usize,
     detail: String,
 ) -> ProcessingResult {
     let mail_config = config.mail.as_ref().expect("validated by process_once");
@@ -237,7 +258,10 @@ async fn review_result(
             subject,
             student_name,
             folder_id: None,
+            folder_name: None,
+            attachment_count,
             uploaded_file_ids: Vec::new(),
+            uploaded_file_names: Vec::new(),
             skipped_existing_files: Vec::new(),
             status: ProcessingStatus::NeedsReview,
             detail,
@@ -248,7 +272,10 @@ async fn review_result(
             subject,
             student_name,
             folder_id: None,
+            folder_name: None,
+            attachment_count,
             uploaded_file_ids: Vec::new(),
+            uploaded_file_names: Vec::new(),
             skipped_existing_files: Vec::new(),
             status: ProcessingStatus::Failed,
             detail: format!("{detail}; could not route to review mailbox: {error}"),
@@ -256,12 +283,16 @@ async fn review_result(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn failed_result(
     uid: u32,
     message: &ParsedMessage,
     student_name: Option<String>,
     folder_id: Option<String>,
+    folder_name: Option<String>,
+    attachment_count: usize,
     uploaded_file_ids: Vec<String>,
+    uploaded_file_names: Vec<String>,
     skipped_existing_files: Vec<String>,
     detail: String,
 ) -> ProcessingResult {
@@ -271,7 +302,10 @@ fn failed_result(
         subject: message.subject.clone(),
         student_name,
         folder_id,
+        folder_name,
+        attachment_count,
         uploaded_file_ids,
+        uploaded_file_names,
         skipped_existing_files,
         status: ProcessingStatus::Failed,
         detail,

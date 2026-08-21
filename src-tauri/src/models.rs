@@ -106,7 +106,11 @@ pub struct ProcessingResult {
     pub subject: Option<String>,
     pub student_name: Option<String>,
     pub folder_id: Option<String>,
+    pub folder_name: Option<String>,
+    pub attachment_count: usize,
     pub uploaded_file_ids: Vec<String>,
+    #[serde(default)]
+    pub uploaded_file_names: Vec<String>,
     pub skipped_existing_files: Vec<String>,
     pub status: ProcessingStatus,
     pub detail: String,

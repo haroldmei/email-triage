@@ -31,7 +31,10 @@ type ProcessingResult = {
   subject?: string | null;
   studentName?: string | null;
   folderId?: string | null;
+  folderName?: string | null;
+  attachmentCount: number;
   uploadedFileIds: string[];
+  uploadedFileNames: string[];
   skippedExistingFiles: string[];
   status: 'uploaded' | 'processedNoAttachments' | 'needsReview' | 'failed';
   detail: string;
@@ -63,6 +66,8 @@ export default function App() {
     { id: 'root', name: 'My Drive' },
   ]);
   const [results, setResults] = useState<ProcessingResult[]>([]);
+  const [logLines, setLogLines] = useState<string[]>([]);
+  const [logPath, setLogPath] = useState('');
   const [autostart, setAutostartState] = useState(false);
   const [busy, setBusy] = useState<string | null>(null);
   const [notice, setNotice] = useState<string>('');
@@ -78,6 +83,13 @@ export default function App() {
       .catch((err) => setError(String(err)));
   }, []);
 
+  useEffect(() => {
+    refreshLogs();
+    invoke<string>('get_log_path').then(setLogPath).catch(() => undefined);
+    const timer = window.setInterval(refreshLogs, 2000);
+    return () => window.clearInterval(timer);
+  }, []);
+
   const ready = Boolean(config.mail && config.googleEmail && config.driveRootId);
   const summary = useMemo(() => {
     return results.reduce(
@@ -88,6 +100,15 @@ export default function App() {
       { uploaded: 0, processedNoAttachments: 0, needsReview: 0, failed: 0 },
     );
   }, [results]);
+
+  async function refreshLogs() {
+    try {
+      const lines = await invoke<string[]>('get_recent_logs', { maxLines: 200 });
+      setLogLines(lines);
+    } catch {
+      // Logging must never block the primary mail-processing workflow.
+    }
+  }
 
   async function runAction<T>(label: string, fn: () => Promise<T>): Promise<T | undefined> {
     setBusy(label);
@@ -196,6 +217,7 @@ export default function App() {
     );
     if (processed) {
       setResults(processed);
+      await refreshLogs();
       setNotice(`Processed ${processed.length} new message${processed.length === 1 ? '' : 's'}.`);
     }
   }
@@ -397,15 +419,36 @@ export default function App() {
                   <div>
                     <strong>{result.studentName ?? result.subject ?? `Message UID ${result.uid}`}</strong>
                     <p>{result.detail}</p>
-                    {result.uploadedFileIds.length > 0 && (
-                      <small>{result.uploadedFileIds.length} attachment(s) uploaded</small>
-                    )}
+                    <small>
+                      {result.attachmentCount} attachment(s) found
+                      {result.folderName ? ` · Drive folder: ${result.folderName}` : ''}
+                      {result.uploadedFileNames.length > 0 ? ` · Uploaded: ${result.uploadedFileNames.join(', ')}` : ''}
+                    </small>
                   </div>
                 </div>
               ))}
             </div>
           </>
         )}
+      </section>
+
+      <section className="panel logPanel">
+        <div className="panelHeader">
+          <div>
+            <p className="eyebrow">Live activity</p>
+            <h2>Processing log</h2>
+          </div>
+          <button type="button" onClick={refreshLogs}>Refresh</button>
+        </div>
+        <div className="logMeta">
+          <span>UI refreshes every 2 seconds. Mailbox checks run every {config.pollIntervalSeconds} seconds.</span>
+          {logPath && <span title={logPath}>Log file: {logPath}</span>}
+        </div>
+        <pre className="logViewer" aria-live="polite">
+          {logLines.length > 0
+            ? logLines.join('\n')
+            : 'No activity logged yet. The next configured mailbox check will appear here.'}
+        </pre>
       </section>
     </main>
   );
