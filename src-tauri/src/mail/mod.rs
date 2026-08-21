@@ -73,7 +73,7 @@ pub async fn fetch_unseen_messages(
         .map_err(|e| MailError::Imap(e.to_string()))?;
 
     let unseen = session
-        .search("UNSEEN")
+        .uid_search("UNSEEN")
         .await
         .map_err(|e| MailError::Imap(e.to_string()))?;
 
@@ -84,23 +84,23 @@ pub async fn fetch_unseen_messages(
     }
 
     let mut result = Vec::with_capacity(ids.len());
-    for sequence in ids {
+    for uid in ids {
         let raw = {
             let mut stream = session
-                .fetch(sequence.to_string(), "RFC822")
+                .uid_fetch(uid.to_string(), "RFC822")
                 .await
                 .map_err(|e| MailError::Imap(e.to_string()))?;
             let fetch = stream
                 .try_next()
                 .await
                 .map_err(|e| MailError::Imap(e.to_string()))?
-                .ok_or_else(|| MailError::Imap(format!("message {sequence} was not returned")))?;
+                .ok_or_else(|| MailError::Imap(format!("message UID {uid} was not returned")))?;
             fetch
                 .body()
                 .map(ToOwned::to_owned)
-                .ok_or_else(|| MailError::Imap(format!("message {sequence} had no RFC822 body")))?
+                .ok_or_else(|| MailError::Imap(format!("message UID {uid} had no RFC822 body")))?
         };
-        result.push(FetchedMessage { sequence, raw });
+        result.push(FetchedMessage { uid, raw });
     }
 
     session
@@ -108,6 +108,54 @@ pub async fn fetch_unseen_messages(
         .await
         .map_err(|e| MailError::Imap(e.to_string()))?;
     Ok(result)
+}
+
+pub async fn move_message(
+    config: &MailConfig,
+    password: &str,
+    uid: u32,
+    destination: &str,
+) -> Result<(), MailError> {
+    if destination.trim().is_empty() {
+        return Err(MailError::InvalidConfig(
+            "destination mailbox is required".into(),
+        ));
+    }
+
+    let mut session = connect(config, password).await?;
+    session
+        .select(&config.mailbox)
+        .await
+        .map_err(|e| MailError::Imap(e.to_string()))?;
+
+    // CREATE returning NO normally means the mailbox already exists. The move/copy below
+    // is authoritative and will still fail if the mailbox is genuinely unavailable.
+    let _ = session.create(destination).await;
+
+    if session.uid_mv(uid.to_string(), destination).await.is_err() {
+        session
+            .uid_copy(uid.to_string(), destination)
+            .await
+            .map_err(|e| MailError::Imap(e.to_string()))?;
+        let updates = session
+            .uid_store(uid.to_string(), "+FLAGS.SILENT (\\Deleted)")
+            .await
+            .map_err(|e| MailError::Imap(e.to_string()))?;
+        let _: Vec<_> = updates
+            .try_collect()
+            .await
+            .map_err(|e| MailError::Imap(e.to_string()))?;
+        session
+            .expunge()
+            .await
+            .map_err(|e| MailError::Imap(e.to_string()))?;
+    }
+
+    session
+        .logout()
+        .await
+        .map_err(|e| MailError::Imap(e.to_string()))?;
+    Ok(())
 }
 
 async fn connect(
