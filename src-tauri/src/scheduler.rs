@@ -64,33 +64,41 @@ pub fn start(app: AppHandle) {
             tokio::time::sleep(Duration::from_secs(wait)).await;
 
             let Ok(cfg) = config::load(&app) else {
+                logging::write(&app, "ERROR", "source=background configuration_load failed");
                 continue;
             };
             if !is_ready(&cfg) {
+                logging::write(&app, "INFO", "source=background mailbox_check skipped reason=setup_incomplete");
                 continue;
             }
 
             let gate = app.state::<ProcessingGate>().inner().clone();
             let Some(_lease) = try_enter(&gate, "background") else {
+                logging::write(&app, "INFO", "source=background mailbox_check skipped reason=processing_already_running");
                 continue;
             };
 
-            logging::write(&app, "INFO", "background processing started");
-            match timeout(Duration::from_secs(120), workflow::process_once(&cfg, 100)).await {
-                Ok(Ok(results)) => logging::write(
-                    &app,
-                    "INFO",
-                    format!("background processing completed: {} message(s)", results.len()),
+            logging::write(
+                &app,
+                "INFO",
+                format!(
+                    "source=background mailbox_check started poll_interval_seconds={}",
+                    cfg.poll_interval_seconds
                 ),
+            );
+            match timeout(Duration::from_secs(120), workflow::process_once(&cfg, 100)).await {
+                Ok(Ok(results)) => {
+                    logging::write_processing_results(&app, "background", &cfg, &results)
+                }
                 Ok(Err(error)) => logging::write(
                     &app,
                     "ERROR",
-                    format!("background processing failed: {error}"),
+                    format!("source=background mailbox_check failed error=\"{error}\""),
                 ),
                 Err(_) => logging::write(
                     &app,
                     "ERROR",
-                    "background processing timed out after 120 seconds",
+                    "source=background mailbox_check timed_out seconds=120",
                 ),
             }
         }
