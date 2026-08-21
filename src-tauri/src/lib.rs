@@ -120,6 +120,11 @@ fn get_log_path(app: AppHandle) -> Result<String, String> {
 }
 
 #[tauri::command]
+fn get_recent_logs(app: AppHandle, max_lines: usize) -> Result<Vec<String>, String> {
+    logging::read_recent(&app, max_lines)
+}
+
+#[tauri::command]
 async fn process_now(
     app: AppHandle,
     gate: State<'_, ProcessingGate>,
@@ -130,24 +135,20 @@ async fn process_now(
         return Err(format!("Email processing is already running ({source})"));
     };
 
-    logging::write(&app, "INFO", "manual processing started");
+    logging::write(&app, "INFO", "source=manual mailbox_check started");
     let app_config = config::load(&app).map_err(|e| e.to_string())?;
     let result = timeout(Duration::from_secs(120), workflow::process_once(&app_config, 100)).await;
     match result {
         Ok(Ok(results)) => {
-            logging::write(
-                &app,
-                "INFO",
-                format!("manual processing completed: {} message(s)", results.len()),
-            );
+            logging::write_processing_results(&app, "manual", &app_config, &results);
             Ok(results)
         }
         Ok(Err(error)) => {
-            logging::write(&app, "ERROR", format!("manual processing failed: {error}"));
+            logging::write(&app, "ERROR", format!("source=manual mailbox_check failed error=\"{error}\""));
             Err(error.to_string())
         }
         Err(_) => {
-            logging::write(&app, "ERROR", "manual processing timed out after 120 seconds");
+            logging::write(&app, "ERROR", "source=manual mailbox_check timed_out seconds=120");
             Err("Email processing timed out after 120 seconds. Check the local app log for the last completed stage.".into())
         }
     }
@@ -241,6 +242,7 @@ pub fn run() {
             list_drive_folders,
             set_drive_root,
             get_log_path,
+            get_recent_logs,
             process_now,
             get_autostart,
             set_autostart,
