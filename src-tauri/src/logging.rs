@@ -32,6 +32,6 @@ pub fn write(app: &AppHandle, level: &str, message: impl AsRef<str>) {
         .duration_since(UNIX_EPOCH)
         .map(|duration| duration.as_secs())
         .unwrap_or_default();
-    let message = message.as_ref().replace(['\r', '\n'], " ");
+    let message = message.as_ref().replace('\r', " ").replace('\n', " ");
     let _ = writeln!(file, "{timestamp} [{level}] {message}");
 }
