@@ -65,14 +65,9 @@ pub async fn process_once(
     let password = PlatformCredentialStore
         .get(MAIL_SERVICE, &mail_config.username)
         .map_err(|e| WorkflowError::Credential(e.to_string()))?;
-    let drive = client_from_stored_refresh_token(google_client_id, google_email)
-        .await
-        .map_err(|e| WorkflowError::Drive(e.to_string()))?;
-    let folders = drive
-        .list_folders(root_id)
-        .await
-        .map_err(|e| WorkflowError::Drive(e.to_string()))?;
 
+    // Discover mail candidates before contacting Drive. This keeps idle polls cheap and makes
+    // mailbox diagnostics independent of transient Google OAuth/Drive failures.
     let listing = mail::list_message_uids(mail_config, &password)
         .await
         .map_err(|e| WorkflowError::Mail(e.to_string()))?;
@@ -97,6 +92,18 @@ pub async fn process_once(
             listing.uid_validity
         ),
     );
+
+    if pending_uids.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let drive = client_from_stored_refresh_token(google_client_id, google_email)
+        .await
+        .map_err(|e| WorkflowError::Drive(e.to_string()))?;
+    let folders = drive
+        .list_folders(root_id)
+        .await
+        .map_err(|e| WorkflowError::Drive(e.to_string()))?;
 
     let messages = mail::fetch_messages_by_uid(
         mail_config,
