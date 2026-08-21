@@ -47,6 +47,8 @@ const defaults: AppConfig = {
   reviewMailbox: 'EmailTriage-NeedsReview',
 };
 
+const googleClientId = (import.meta.env.VITE_GOOGLE_CLIENT_ID ?? '').trim();
+
 export default function App() {
   const [config, setConfig] = useState<AppConfig>(defaults);
   const [mail, setMail] = useState<MailConfig>({
@@ -56,9 +58,6 @@ export default function App() {
     mailbox: 'INBOX',
   });
   const [password, setPassword] = useState('');
-  const [googleClientId, setGoogleClientId] = useState(
-    import.meta.env.VITE_GOOGLE_CLIENT_ID ?? '',
-  );
   const [folders, setFolders] = useState<DriveFile[]>([]);
   const [folderPath, setFolderPath] = useState<Array<{ id: string; name: string }>>([
     { id: 'root', name: 'My Drive' },
@@ -75,7 +74,6 @@ export default function App() {
         setConfig(saved);
         setAutostartState(autostartEnabled);
         if (saved.mail) setMail(saved.mail);
-        if (saved.googleClientId) setGoogleClientId(saved.googleClientId);
       })
       .catch((err) => setError(String(err)));
   }, []);
@@ -124,8 +122,13 @@ export default function App() {
   }
 
   async function connectGoogle() {
+    if (!googleClientId) {
+      setError('Google sign-in is not configured in this build.');
+      return;
+    }
+
     const connection = await runAction('google', () =>
-      invoke<{ email: string }>('connect_google_account', { clientId: googleClientId.trim() }),
+      invoke<{ email: string }>('connect_google_account', { clientId: googleClientId }),
     );
     if (connection) {
       await reloadConfig();
@@ -296,25 +299,17 @@ export default function App() {
           </div>
 
           <div className="form">
-            {!import.meta.env.VITE_GOOGLE_CLIENT_ID && (
-              <label>
-                Google Desktop OAuth client ID
-                <input
-                  value={googleClientId}
-                  onChange={(e) => setGoogleClientId(e.target.value)}
-                  placeholder="…apps.googleusercontent.com"
-                />
-                <small>Developer builds only. Release builds can provide this at build time.</small>
-              </label>
-            )}
             <button
               type="button"
               className="primary"
-              disabled={Boolean(busy) || !googleClientId.trim()}
+              disabled={Boolean(busy) || !googleClientId}
               onClick={connectGoogle}
             >
-              {busy === 'google' ? 'Waiting for Google…' : 'Connect Google Workspace'}
+              {busy === 'google' ? 'Waiting for Google…' : 'Sign in with Google'}
             </button>
+            {!googleClientId && (
+              <small>Google sign-in is unavailable because this build is missing its OAuth configuration.</small>
+            )}
 
             {config.googleEmail && (
               <div className="folderPicker">
