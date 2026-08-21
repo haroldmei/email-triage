@@ -63,11 +63,19 @@ pub fn write_processing_results(
     config: &AppConfig,
     results: &[ProcessingResult],
 ) {
+    let mailbox = config
+        .mail
+        .as_ref()
+        .map(|mail| quoted(&mail.mailbox))
+        .unwrap_or_else(|| quoted("unknown"));
+
     if results.is_empty() {
         write(
             app,
             "INFO",
-            format!("source={source} mailbox_check new_messages=0"),
+            format!(
+                "source={source} mailbox_check mailbox={mailbox} candidate_messages=0"
+            ),
         );
         return;
     }
@@ -104,7 +112,7 @@ pub fn write_processing_results(
             app,
             level,
             format!(
-                "source={source} uid={} status={status} student={student} attachments={} folder={folder} folder_id={folder_id} uploaded={uploaded} skipped_existing={skipped} moved_to={moved_to} detail={detail}",
+                "source={source} mailbox={mailbox} uid={} status={status} student={student} attachments={} folder={folder} folder_id={folder_id} uploaded={uploaded} skipped_existing={skipped} moved_to={moved_to} detail={detail}",
                 result.uid, result.attachment_count
             ),
         );
@@ -114,7 +122,7 @@ pub fn write_processing_results(
         app,
         "INFO",
         format!(
-            "source={source} mailbox_check new_messages={} uploaded={} needs_review={} failed={}",
+            "source={source} mailbox_check mailbox={mailbox} candidate_messages={} uploaded={} needs_review={} failed={}",
             results.len(),
             results
                 .iter()
@@ -169,6 +177,9 @@ mod tests {
     #[test]
     fn quoted_values_are_single_line_and_escaped() {
         assert_eq!(quoted("a\\b\"c"), "\"a\\\\b\\\"c\"");
-        assert_eq!(quoted_list(&["a.pdf".into(), "b.docx".into()]), "[\"a.pdf\",\"b.docx\"]");
+        assert_eq!(
+            quoted_list(&["a.pdf".into(), "b.docx".into()]),
+            "[\"a.pdf\",\"b.docx\"]"
+        );
     }
 }
