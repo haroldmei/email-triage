@@ -51,11 +51,6 @@ fn validate(config: &AppConfig) -> Result<(), ConfigError> {
             "poll interval must be at least 30 seconds".into(),
         ));
     }
-    if config.processed_mailbox.trim().is_empty() || config.review_mailbox.trim().is_empty() {
-        return Err(ConfigError::Invalid(
-            "processed and review mailbox names are required".into(),
-        ));
-    }
     Ok(())
 }
 
