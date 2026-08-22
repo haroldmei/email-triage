@@ -4,6 +4,7 @@ use std::{fmt::Display, future::Future, time::Duration};
 
 use async_imap::Client;
 use async_native_tls::TlsConnector;
+use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use futures::TryStreamExt;
 use thiserror::Error;
 use tokio::{net::TcpStream, time::timeout};
@@ -12,6 +13,7 @@ use crate::models::{FetchedMessage, MailConfig};
 
 const NETWORK_TIMEOUT: Duration = Duration::from_secs(15);
 const IMAP_COMMAND_TIMEOUT: Duration = Duration::from_secs(30);
+pub const MAIL_LOOKBACK_HOURS: i64 = 12;
 
 #[derive(Debug, Error)]
 pub enum MailError {
@@ -73,16 +75,47 @@ pub async fn list_message_uids(
         MailError::Imap("examined mailbox did not report UIDVALIDITY".into())
     })?;
 
-    // ALL intentionally includes both read and unread messages. Processing state is local-only.
-    let all = imap_op("search ALL", session.uid_search("ALL")).await?;
-    let mut uids: Vec<u32> = all.into_iter().collect();
-    uids.sort_unstable();
+    let cutoff = Utc::now() - ChronoDuration::hours(MAIL_LOOKBACK_HOURS);
+
+    // IMAP SINCE has day-level precision, so use it only to narrow the server-side search.
+    // INTERNALDATE below applies the exact rolling 12-hour cutoff before any full body is fetched.
+    let since_query = format!("SINCE {}", cutoff.format("%d-%b-%Y"));
+    let coarse = imap_op("search recent messages", session.uid_search(since_query)).await?;
+    let mut coarse_uids: Vec<u32> = coarse.into_iter().collect();
+    coarse_uids.sort_unstable();
+
+    let mut recent_uids = Vec::new();
+    if !coarse_uids.is_empty() {
+        let uid_set = coarse_uids
+            .iter()
+            .map(u32::to_string)
+            .collect::<Vec<_>>()
+            .join(",");
+        let mut stream = imap_op(
+            "start recent metadata fetch",
+            session.uid_fetch(uid_set, "(UID INTERNALDATE)"),
+        )
+        .await?;
+
+        while let Some(fetch) = imap_op("read recent metadata fetch", stream.try_next()).await? {
+            let Some(uid) = fetch.uid else {
+                continue;
+            };
+            let Some(internal_date) = fetch.internal_date() else {
+                continue;
+            };
+            if is_within_lookback(internal_date.with_timezone(&Utc), cutoff) {
+                recent_uids.push(uid);
+            }
+        }
+    }
+    recent_uids.sort_unstable();
 
     imap_op("logout", session.logout()).await?;
     Ok(MailboxListing {
         uid_validity,
         total_messages: mailbox.exists,
-        uids,
+        uids: recent_uids,
     })
 }
 
@@ -127,6 +160,10 @@ pub async fn fetch_messages_by_uid(
 
     imap_op("logout", session.logout()).await?;
     Ok(result)
+}
+
+fn is_within_lookback(internal_date: DateTime<Utc>, cutoff: DateTime<Utc>) -> bool {
+    internal_date >= cutoff
 }
 
 async fn connect(
@@ -188,5 +225,20 @@ mod tests {
             config.validate(),
             Err(MailError::InvalidConfig(_))
         ));
+    }
+
+    #[test]
+    fn exact_lookback_includes_boundary_and_excludes_older_mail() {
+        let cutoff = DateTime::parse_from_rfc3339("2026-08-21T12:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let boundary = DateTime::parse_from_rfc3339("2026-08-21T12:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let older = DateTime::parse_from_rfc3339("2026-08-21T11:59:59Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        assert!(is_within_lookback(boundary, cutoff));
+        assert!(!is_within_lookback(older, cutoff));
     }
 }

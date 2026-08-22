@@ -1,6 +1,6 @@
 [package]
 name = "email-triage"
-version = "0.1.5"
+version = "0.1.6"
 description = "Local-first email triage desktop app"
 authors = ["Email Triage contributors"]
 edition = "2021"
