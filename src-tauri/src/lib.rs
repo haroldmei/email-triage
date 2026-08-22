@@ -9,7 +9,7 @@ pub mod models;
 pub mod scheduler;
 pub mod workflow;
 
-use std::time::Duration;
+use std::time::Instant;
 
 use tauri::{
     menu::{Menu, MenuItem},
@@ -157,27 +157,36 @@ async fn process_now(
         .as_ref()
         .map(|mail| mail.mailbox.as_str())
         .unwrap_or("unknown");
+    let started = Instant::now();
     logging::write(
         &app,
         "INFO",
-        format!("source=manual mailbox_check mailbox=\"{mailbox}\" started"),
+        format!(
+            "source=manual mailbox_check mailbox=\"{mailbox}\" started watchdog_seconds={}",
+            scheduler::PROCESSING_TIMEOUT.as_secs()
+        ),
     );
 
     let result = timeout(
-        Duration::from_secs(120),
+        scheduler::PROCESSING_TIMEOUT,
         workflow::process_once(&app, &app_config, 100),
     )
     .await;
     match result {
         Ok(Ok(results)) => {
             logging::write_processing_results(&app, "manual", &results);
+            logging::write(
+                &app,
+                "INFO",
+                format!("source=manual mailbox_check mailbox=\"{mailbox}\" completed elapsed_ms={}", started.elapsed().as_millis()),
+            );
             Ok(results)
         }
         Ok(Err(error)) => {
             logging::write(
                 &app,
                 "ERROR",
-                format!("source=manual mailbox_check mailbox=\"{mailbox}\" failed error=\"{error}\""),
+                format!("source=manual mailbox_check mailbox=\"{mailbox}\" failed elapsed_ms={} error=\"{error}\"", started.elapsed().as_millis()),
             );
             Err(error.to_string())
         }
@@ -185,9 +194,12 @@ async fn process_now(
             logging::write(
                 &app,
                 "ERROR",
-                format!("source=manual mailbox_check mailbox=\"{mailbox}\" timed_out seconds=120"),
+                format!("source=manual mailbox_check mailbox=\"{mailbox}\" timed_out seconds={} elapsed_ms={}", scheduler::PROCESSING_TIMEOUT.as_secs(), started.elapsed().as_millis()),
             );
-            Err("Email processing timed out after 120 seconds. Check the local app log for the last completed stage.".into())
+            Err(format!(
+                "Email processing timed out after {} seconds. Check the local app log for the last completed stage.",
+                scheduler::PROCESSING_TIMEOUT.as_secs()
+            ))
         }
     }
 }
@@ -266,7 +278,7 @@ pub fn run() {
             logging::write(
                 app.handle(),
                 "INFO",
-                format!("Email Triage started processing_state=idle mail_access=read_only local_state=\"{state_path}\""),
+                format!("Email Triage started processing_state=idle mail_access=read_only local_state=\"{state_path}\" message_fetch_timeout_seconds={} processing_watchdog_seconds={}", mail::MESSAGE_FETCH_TIMEOUT.as_secs(), scheduler::PROCESSING_TIMEOUT.as_secs()),
             );
             setup_tray(app)?;
             scheduler::start(app.handle().clone());

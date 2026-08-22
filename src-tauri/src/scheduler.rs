@@ -3,13 +3,15 @@ use std::{
         atomic::{AtomicBool, Ordering},
         Arc, Mutex,
     },
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use tauri::{AppHandle, Manager};
 use tokio::time::timeout;
 
 use crate::{config, logging, workflow};
+
+pub const PROCESSING_TIMEOUT: Duration = Duration::from_secs(600);
 
 pub struct ProcessingState {
     active: AtomicBool,
@@ -88,27 +90,34 @@ pub fn start(app: AppHandle) {
                 .as_ref()
                 .map(|mail| mail.mailbox.as_str())
                 .unwrap_or("unknown");
+            let started = Instant::now();
             logging::write(
                 &app,
                 "INFO",
                 format!(
-                    "source=background mailbox_check mailbox=\"{mailbox}\" started poll_interval_seconds={}",
-                    cfg.poll_interval_seconds
+                    "source=background mailbox_check mailbox=\"{mailbox}\" started poll_interval_seconds={} watchdog_seconds={}",
+                    cfg.poll_interval_seconds,
+                    PROCESSING_TIMEOUT.as_secs()
                 ),
             );
-            match timeout(Duration::from_secs(120), workflow::process_once(&app, &cfg, 100)).await {
+            match timeout(PROCESSING_TIMEOUT, workflow::process_once(&app, &cfg, 100)).await {
                 Ok(Ok(results)) => {
-                    logging::write_processing_results(&app, "background", &results)
+                    logging::write_processing_results(&app, "background", &results);
+                    logging::write(
+                        &app,
+                        "INFO",
+                        format!("source=background mailbox_check mailbox=\"{mailbox}\" completed elapsed_ms={}", started.elapsed().as_millis()),
+                    );
                 }
                 Ok(Err(error)) => logging::write(
                     &app,
                     "ERROR",
-                    format!("source=background mailbox_check mailbox=\"{mailbox}\" failed error=\"{error}\""),
+                    format!("source=background mailbox_check mailbox=\"{mailbox}\" failed elapsed_ms={} error=\"{error}\"", started.elapsed().as_millis()),
                 ),
                 Err(_) => logging::write(
                     &app,
                     "ERROR",
-                    format!("source=background mailbox_check mailbox=\"{mailbox}\" timed_out seconds=120"),
+                    format!("source=background mailbox_check mailbox=\"{mailbox}\" timed_out seconds={} elapsed_ms={}", PROCESSING_TIMEOUT.as_secs(), started.elapsed().as_millis()),
                 ),
             }
         }
@@ -144,5 +153,11 @@ mod tests {
         drop(lease);
         assert!(current_source(&gate).is_none());
         assert!(try_enter(&gate, "background").is_some());
+    }
+
+    #[test]
+    fn processing_watchdog_allows_multiple_large_message_fetches() {
+        assert_eq!(PROCESSING_TIMEOUT.as_secs(), 600);
+        assert!(PROCESSING_TIMEOUT > crate::mail::MESSAGE_FETCH_TIMEOUT);
     }
 }

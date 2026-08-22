@@ -1,3 +1,5 @@
+use std::time::Instant;
+
 use sha2::{Digest, Sha256};
 use tauri::AppHandle;
 use thiserror::Error;
@@ -40,6 +42,7 @@ pub async fn process_once(
     config: &AppConfig,
     limit: usize,
 ) -> Result<Vec<ProcessingResult>, WorkflowError> {
+    let run_started = Instant::now();
     let mail_config = config
         .mail
         .as_ref()
@@ -66,6 +69,12 @@ pub async fn process_once(
         .get(MAIL_SERVICE, &mail_config.username)
         .map_err(|e| WorkflowError::Credential(e.to_string()))?;
 
+    let scan_started = Instant::now();
+    logging::write(
+        app,
+        "INFO",
+        format!("stage=mailbox_scan mailbox=\"{}\" started", mail_config.mailbox),
+    );
     let listing = mail::list_message_uids(mail_config, &password)
         .await
         .map_err(|e| WorkflowError::Mail(e.to_string()))?;
@@ -82,20 +91,33 @@ pub async fn process_once(
         app,
         "INFO",
         format!(
-            "mailbox_scan mailbox=\"{}\" total_messages={} known_local={} candidate_messages={} uid_validity={}",
+            "stage=mailbox_scan mailbox=\"{}\" completed total_messages={} known_local={} recent_window={} candidate_messages={} recent_uid_first={} recent_uid_last={} candidate_uid_first={} candidate_uid_last={} uid_validity={} elapsed_ms={}",
             mail_config.mailbox,
             listing.total_messages,
             skipped_local,
+            listing.uids.len(),
             pending_uids.len(),
-            listing.uid_validity
+            listing.uids.first().copied().unwrap_or_default(),
+            listing.uids.last().copied().unwrap_or_default(),
+            pending_uids.first().copied().unwrap_or_default(),
+            pending_uids.last().copied().unwrap_or_default(),
+            listing.uid_validity,
+            scan_started.elapsed().as_millis()
         ),
     );
 
     if pending_uids.is_empty() {
+        logging::write(
+            app,
+            "INFO",
+            format!("stage=process_once completed candidate_messages=0 elapsed_ms={}", run_started.elapsed().as_millis()),
+        );
         return Ok(Vec::new());
     }
 
-    let messages = mail::fetch_messages_by_uid(
+    let fetch_started = Instant::now();
+    let batch = mail::fetch_messages_by_uid(
+        app,
         mail_config,
         &password,
         listing.uid_validity,
@@ -103,37 +125,102 @@ pub async fn process_once(
     )
     .await
     .map_err(|e| WorkflowError::Mail(e.to_string()))?;
+    logging::write(
+        app,
+        "INFO",
+        format!(
+            "stage=message_fetch_batch completed requested={} fetched={} failed={} elapsed_ms={}",
+            pending_uids.len(),
+            batch.messages.len(),
+            batch.failures.len(),
+            fetch_started.elapsed().as_millis()
+        ),
+    );
+
+    let mut results = batch
+        .failures
+        .into_iter()
+        .map(|failure| fetch_failure_result(failure.uid, failure.error))
+        .collect::<Vec<_>>();
 
     // Parse first so messages without attachments can be completed locally without requiring Drive.
-    let mut parsed = Vec::with_capacity(messages.len());
-    let mut results = Vec::new();
-    for fetched in messages {
+    let mut parsed = Vec::with_capacity(batch.messages.len());
+    for fetched in batch.messages {
+        let parse_started = Instant::now();
         match parse_message(&fetched.raw) {
-            Ok(message) if message.attachments.is_empty() => {
-                results.push(no_attachment_result(fetched.uid, message));
+            Ok(message) => {
+                logging::write(
+                    app,
+                    "INFO",
+                    format!(
+                        "stage=mime_parse uid={} completed attachments={} elapsed_ms={}",
+                        fetched.uid,
+                        message.attachments.len(),
+                        parse_started.elapsed().as_millis()
+                    ),
+                );
+                if message.attachments.is_empty() {
+                    results.push(no_attachment_result(fetched.uid, message));
+                } else {
+                    parsed.push((fetched, message));
+                }
             }
-            Ok(message) => parsed.push((fetched, message)),
-            Err(error) => results.push(review_result(
-                fetched.uid,
-                None,
-                None,
-                None,
-                0,
-                format!("Could not parse message: {error}"),
-            )),
+            Err(error) => {
+                logging::write(
+                    app,
+                    "WARN",
+                    format!(
+                        "stage=mime_parse uid={} failed elapsed_ms={} error=\"{}\"",
+                        fetched.uid,
+                        parse_started.elapsed().as_millis(),
+                        error
+                    ),
+                );
+                results.push(review_result(
+                    fetched.uid,
+                    None,
+                    None,
+                    None,
+                    0,
+                    format!("Could not parse message: {error}"),
+                ));
+            }
         }
     }
 
     if !parsed.is_empty() {
+        let drive_auth_started = Instant::now();
+        logging::write(app, "INFO", "stage=drive_connect started");
         let drive = client_from_stored_refresh_token(google_client_id, google_email)
             .await
             .map_err(|e| WorkflowError::Drive(e.to_string()))?;
+        logging::write(
+            app,
+            "INFO",
+            format!("stage=drive_connect completed elapsed_ms={}", drive_auth_started.elapsed().as_millis()),
+        );
+
+        let folder_started = Instant::now();
+        logging::write(
+            app,
+            "INFO",
+            format!("stage=drive_folder_list root_id=\"{root_id}\" started"),
+        );
         let folders = drive
             .list_folders(root_id)
             .await
             .map_err(|e| WorkflowError::Drive(e.to_string()))?;
+        logging::write(
+            app,
+            "INFO",
+            format!(
+                "stage=drive_folder_list root_id=\"{root_id}\" completed folders={} elapsed_ms={}",
+                folders.len(),
+                folder_started.elapsed().as_millis()
+            ),
+        );
         for (fetched, message) in parsed {
-            results.push(process_parsed_message(&drive, &folders, fetched, message).await);
+            results.push(process_parsed_message(app, &drive, &folders, fetched, message).await);
         }
     }
 
@@ -150,7 +237,34 @@ pub async fn process_once(
             .map_err(WorkflowError::LocalState)?;
         }
     }
+    logging::write(
+        app,
+        "INFO",
+        format!(
+            "stage=process_once completed results={} failed={} elapsed_ms={}",
+            results.len(),
+            results.iter().filter(|result| matches!(result.status, ProcessingStatus::Failed)).count(),
+            run_started.elapsed().as_millis()
+        ),
+    );
     Ok(results)
+}
+
+fn fetch_failure_result(uid: u32, error: String) -> ProcessingResult {
+    ProcessingResult {
+        uid,
+        message_id: None,
+        subject: None,
+        student_name: None,
+        folder_id: None,
+        folder_name: None,
+        attachment_count: 0,
+        uploaded_file_ids: Vec::new(),
+        uploaded_file_names: Vec::new(),
+        skipped_existing_files: Vec::new(),
+        status: ProcessingStatus::Failed,
+        detail: format!("Could not fetch message; retryable: {error}"),
+    }
 }
 
 fn no_attachment_result(uid: u32, message: ParsedMessage) -> ProcessingResult {
@@ -173,19 +287,43 @@ fn no_attachment_result(uid: u32, message: ParsedMessage) -> ProcessingResult {
 }
 
 async fn process_parsed_message(
+    app: &AppHandle,
     drive: &DriveClient,
     folders: &[DriveFile],
     fetched: FetchedMessage,
     message: ParsedMessage,
 ) -> ProcessingResult {
+    let message_started = Instant::now();
     let raw_digest = Sha256::digest(&fetched.raw);
     let identity = DeterministicExtractor.extract(&message);
     let student_name = preferred_student_name(&identity).map(|value| value.value.clone());
     let attachment_count = message.attachments.len();
 
+    logging::write(
+        app,
+        "INFO",
+        format!(
+            "stage=student_match uid={} started attachments={} student=\"{}\"",
+            fetched.uid,
+            attachment_count,
+            student_name.as_deref().unwrap_or("unknown")
+        ),
+    );
     let folder = match match_student_folder(folders, &identity) {
-        FolderMatch::Matched(folder) => folder,
+        FolderMatch::Matched(folder) => {
+            logging::write(
+                app,
+                "INFO",
+                format!("stage=student_match uid={} matched folder=\"{}\" folder_id=\"{}\"", fetched.uid, folder.name, folder.id),
+            );
+            folder
+        }
         FolderMatch::Ambiguous(candidates) => {
+            logging::write(
+                app,
+                "WARN",
+                format!("stage=student_match uid={} ambiguous candidates={}", fetched.uid, candidates.len()),
+            );
             return review_result(
                 fetched.uid,
                 message.message_id.clone(),
@@ -204,6 +342,7 @@ async fn process_parsed_message(
             );
         }
         FolderMatch::NotFound => {
+            logging::write(app, "WARN", format!("stage=student_match uid={} not_found", fetched.uid));
             return review_result(
                 fetched.uid,
                 message.message_id.clone(),
@@ -219,15 +358,38 @@ async fn process_parsed_message(
     let mut uploaded_file_names = Vec::new();
     let mut skipped_existing_files = Vec::new();
 
-    for attachment in &message.attachments {
+    for (attachment_index, attachment) in message.attachments.iter().enumerate() {
+        let attachment_started = Instant::now();
+        logging::write(
+            app,
+            "INFO",
+            format!(
+                "stage=attachment uid={} sequence={}/{} filename=\"{}\" bytes={} started",
+                fetched.uid,
+                attachment_index + 1,
+                attachment_count,
+                attachment.filename,
+                attachment.bytes.len()
+            ),
+        );
         let key = attachment_key(&raw_digest, attachment.filename.as_bytes(), &attachment.bytes);
         match drive.find_by_triage_key(&folder.id, &key).await {
             Ok(existing) if !existing.is_empty() => {
                 skipped_existing_files.push(attachment.filename.clone());
+                logging::write(
+                    app,
+                    "INFO",
+                    format!("stage=attachment uid={} filename=\"{}\" skipped_existing=true elapsed_ms={}", fetched.uid, attachment.filename, attachment_started.elapsed().as_millis()),
+                );
                 continue;
             }
             Ok(_) => {}
             Err(error) => {
+                logging::write(
+                    app,
+                    "ERROR",
+                    format!("stage=attachment uid={} filename=\"{}\" idempotency_check_failed elapsed_ms={} error=\"{}\"", fetched.uid, attachment.filename, attachment_started.elapsed().as_millis(), error),
+                );
                 return failed_result(
                     fetched.uid,
                     &message,
@@ -247,8 +409,18 @@ async fn process_parsed_message(
             Ok(file) => {
                 uploaded_file_ids.push(file.id);
                 uploaded_file_names.push(attachment.filename.clone());
+                logging::write(
+                    app,
+                    "INFO",
+                    format!("stage=attachment uid={} filename=\"{}\" uploaded=true elapsed_ms={}", fetched.uid, attachment.filename, attachment_started.elapsed().as_millis()),
+                );
             }
             Err(error) => {
+                logging::write(
+                    app,
+                    "ERROR",
+                    format!("stage=attachment uid={} filename=\"{}\" upload_failed elapsed_ms={} error=\"{}\"", fetched.uid, attachment.filename, attachment_started.elapsed().as_millis(), error),
+                );
                 return failed_result(
                     fetched.uid,
                     &message,
@@ -265,6 +437,11 @@ async fn process_parsed_message(
         }
     }
 
+    logging::write(
+        app,
+        "INFO",
+        format!("stage=message_processing uid={} completed attachments={} elapsed_ms={}", fetched.uid, attachment_count, message_started.elapsed().as_millis()),
+    );
     ProcessingResult {
         uid: fetched.uid,
         message_id: message.message_id,
@@ -491,6 +668,14 @@ mod tests {
         assert_eq!(result.status, ProcessingStatus::ProcessedNoAttachments);
         assert_eq!(result.attachment_count, 0);
         assert!(result.folder_id.is_none());
+    }
+
+    #[test]
+    fn fetch_failure_is_retryable() {
+        let result = fetch_failure_result(42, "operation timed out: read message fetch".into());
+        assert_eq!(result.uid, 42);
+        assert_eq!(result.status, ProcessingStatus::Failed);
+        assert!(result.detail.contains("retryable"));
     }
 
     #[test]
