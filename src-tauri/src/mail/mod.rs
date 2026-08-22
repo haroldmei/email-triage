@@ -1,17 +1,22 @@
 pub mod parser;
 
-use std::{fmt::Display, future::Future, time::Duration};
+use std::{fmt::Display, future::Future, time::{Duration, Instant}};
 
 use async_imap::Client;
 use async_native_tls::TlsConnector;
 use futures::TryStreamExt;
+use tauri::AppHandle;
 use thiserror::Error;
 use tokio::{net::TcpStream, time::timeout};
 
-use crate::models::{FetchedMessage, MailConfig};
+use crate::{
+    logging,
+    models::{FetchedMessage, MailConfig},
+};
 
 const NETWORK_TIMEOUT: Duration = Duration::from_secs(15);
 const IMAP_COMMAND_TIMEOUT: Duration = Duration::from_secs(30);
+pub const MESSAGE_FETCH_TIMEOUT: Duration = Duration::from_secs(120);
 pub const RECENT_MESSAGE_WINDOW: usize = 50;
 
 #[derive(Debug, Error)]
@@ -33,6 +38,18 @@ pub struct MailboxListing {
     pub uid_validity: u32,
     pub total_messages: u32,
     pub uids: Vec<u32>,
+}
+
+#[derive(Debug)]
+pub struct MessageFetchFailure {
+    pub uid: u32,
+    pub error: String,
+}
+
+#[derive(Debug, Default)]
+pub struct MessageFetchBatch {
+    pub messages: Vec<FetchedMessage>,
+    pub failures: Vec<MessageFetchFailure>,
 }
 
 impl MailConfig {
@@ -97,16 +114,128 @@ fn recent_uids(mut uids: Vec<u32>) -> Vec<u32> {
 }
 
 pub async fn fetch_messages_by_uid(
+    app: &AppHandle,
     config: &MailConfig,
     password: &str,
     expected_uid_validity: u32,
     uids: &[u32],
-) -> Result<Vec<FetchedMessage>, MailError> {
+) -> Result<MessageFetchBatch, MailError> {
     config.validate()?;
     if uids.is_empty() {
-        return Ok(Vec::new());
+        return Ok(MessageFetchBatch::default());
     }
 
+    let mut session = connect_and_examine(config, password, expected_uid_validity).await?;
+    let mut batch = MessageFetchBatch {
+        messages: Vec::with_capacity(uids.len()),
+        failures: Vec::new(),
+    };
+
+    for (index, uid) in uids.iter().enumerate() {
+        let started = Instant::now();
+        logging::write(
+            app,
+            "INFO",
+            format!(
+                "stage=message_fetch uid={uid} sequence={}/{} started timeout_seconds={}",
+                index + 1,
+                uids.len(),
+                MESSAGE_FETCH_TIMEOUT.as_secs()
+            ),
+        );
+
+        match fetch_one(&mut session, *uid).await {
+            Ok(raw) => {
+                logging::write(
+                    app,
+                    "INFO",
+                    format!(
+                        "stage=message_fetch uid={uid} sequence={}/{} completed bytes={} elapsed_ms={}",
+                        index + 1,
+                        uids.len(),
+                        raw.len(),
+                        started.elapsed().as_millis()
+                    ),
+                );
+                batch.messages.push(FetchedMessage { uid: *uid, raw });
+            }
+            Err(error) => {
+                let is_timeout = matches!(error, MailError::Timeout(_));
+                let timeout_detail = if is_timeout {
+                    format!(" timeout_seconds={}", MESSAGE_FETCH_TIMEOUT.as_secs())
+                } else {
+                    String::new()
+                };
+                logging::write(
+                    app,
+                    "ERROR",
+                    format!(
+                        "stage=message_fetch uid={uid} sequence={}/{} failed retryable=true elapsed_ms={}{} error=\"{}\"",
+                        index + 1,
+                        uids.len(),
+                        started.elapsed().as_millis(),
+                        timeout_detail,
+                        error
+                    ),
+                );
+                batch.failures.push(MessageFetchFailure {
+                    uid: *uid,
+                    error: error.to_string(),
+                });
+
+                // A timed-out/failed FETCH can leave the IMAP protocol stream mid-response.
+                // Discard that session and reconnect before attempting the next UID.
+                if index + 1 < uids.len() {
+                    let reconnect_started = Instant::now();
+                    logging::write(
+                        app,
+                        "INFO",
+                        format!("stage=imap_reconnect after_uid={uid} started"),
+                    );
+                    session = connect_and_examine(config, password, expected_uid_validity).await?;
+                    logging::write(
+                        app,
+                        "INFO",
+                        format!(
+                            "stage=imap_reconnect after_uid={uid} completed elapsed_ms={}",
+                            reconnect_started.elapsed().as_millis()
+                        ),
+                    );
+                }
+            }
+        }
+    }
+
+    let _ = imap_op("logout", session.logout()).await;
+    Ok(batch)
+}
+
+async fn fetch_one(
+    session: &mut async_imap::Session<async_native_tls::TlsStream<TcpStream>>,
+    uid: u32,
+) -> Result<Vec<u8>, MailError> {
+    // BODY.PEEK[] is deliberate: it does not set the user's \\Seen flag.
+    let mut stream = imap_op(
+        "start message fetch",
+        session.uid_fetch(uid.to_string(), "BODY.PEEK[]"),
+    )
+    .await?;
+    let fetch = timeout(MESSAGE_FETCH_TIMEOUT, stream.try_next())
+        .await
+        .map_err(|_| MailError::Timeout("read message fetch"))?
+        .map_err(|e| MailError::Imap(e.to_string()))?
+        .ok_or_else(|| MailError::Imap(format!("message UID {uid} was not returned")))?;
+    fetch
+        .body()
+        .map(ToOwned::to_owned)
+        .ok_or_else(|| MailError::Imap(format!("message UID {uid} had no message body")))
+}
+
+async fn connect_and_examine(
+    config: &MailConfig,
+    password: &str,
+    expected_uid_validity: u32,
+) -> Result<async_imap::Session<async_native_tls::TlsStream<TcpStream>>, MailError> {
     let mut session = connect(config, password).await?;
     let mailbox = imap_op("examine mailbox", session.examine(&config.mailbox)).await?;
     if mailbox.uid_validity != Some(expected_uid_validity) {
@@ -114,29 +243,7 @@ pub async fn fetch_messages_by_uid(
             "mailbox UIDVALIDITY changed during processing; retry the mailbox check".into(),
         ));
     }
-
-    let mut result = Vec::with_capacity(uids.len());
-    for uid in uids {
-        let raw = {
-            // BODY.PEEK[] is deliberate: it does not set the user's \\Seen flag.
-            let mut stream = imap_op(
-                "start message fetch",
-                session.uid_fetch(uid.to_string(), "BODY.PEEK[]"),
-            )
-            .await?;
-            let fetch = imap_op("read message fetch", stream.try_next())
-                .await?
-                .ok_or_else(|| MailError::Imap(format!("message UID {uid} was not returned")))?;
-            fetch
-                .body()
-                .map(ToOwned::to_owned)
-                .ok_or_else(|| MailError::Imap(format!("message UID {uid} had no message body")))?
-        };
-        result.push(FetchedMessage { uid: *uid, raw });
-    }
-
-    imap_op("logout", session.logout()).await?;
-    Ok(result)
+    Ok(session)
 }
 
 async fn connect(
@@ -211,5 +318,11 @@ mod tests {
     #[test]
     fn keeps_all_uids_when_mailbox_has_fewer_than_fifty() {
         assert_eq!(recent_uids(vec![3, 1, 2]), vec![1, 2, 3]);
+    }
+
+    #[test]
+    fn message_fetch_timeout_is_longer_than_command_timeout() {
+        assert!(MESSAGE_FETCH_TIMEOUT > IMAP_COMMAND_TIMEOUT);
+        assert_eq!(MESSAGE_FETCH_TIMEOUT.as_secs(), 120);
     }
 }
