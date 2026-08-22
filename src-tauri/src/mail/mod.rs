@@ -77,11 +77,7 @@ pub async fn list_message_uids(
     // SEARCH ALL returns only UIDs, not message bodies. Keep only the highest UIDs,
     // which represent the most recently appended messages in this mailbox.
     let all = imap_op("search mailbox message UIDs", session.uid_search("ALL")).await?;
-    let mut uids: Vec<u32> = all.into_iter().collect();
-    uids.sort_unstable();
-    if uids.len() > RECENT_MESSAGE_WINDOW {
-        uids = uids.split_off(uids.len() - RECENT_MESSAGE_WINDOW);
-    }
+    let uids = recent_uids(all.into_iter().collect());
 
     imap_op("logout", session.logout()).await?;
     Ok(MailboxListing {
@@ -89,6 +85,15 @@ pub async fn list_message_uids(
         total_messages: mailbox.exists,
         uids,
     })
+}
+
+fn recent_uids(mut uids: Vec<u32>) -> Vec<u32> {
+    uids.sort_unstable();
+    if uids.len() > RECENT_MESSAGE_WINDOW {
+        uids.split_off(uids.len() - RECENT_MESSAGE_WINDOW)
+    } else {
+        uids
+    }
 }
 
 pub async fn fetch_messages_by_uid(
@@ -196,7 +201,15 @@ mod tests {
     }
 
     #[test]
-    fn recent_message_window_is_fifty() {
-        assert_eq!(RECENT_MESSAGE_WINDOW, 50);
+    fn keeps_only_the_highest_fifty_uids() {
+        let selected = recent_uids((1..=60).rev().collect());
+        assert_eq!(selected.len(), 50);
+        assert_eq!(selected.first(), Some(&11));
+        assert_eq!(selected.last(), Some(&60));
+    }
+
+    #[test]
+    fn keeps_all_uids_when_mailbox_has_fewer_than_fifty() {
+        assert_eq!(recent_uids(vec![3, 1, 2]), vec![1, 2, 3]);
     }
 }
