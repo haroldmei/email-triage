@@ -65,7 +65,10 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: email-triage-${{ runner.os }}
-          path: src-tauri/target/release/bundle/**
+          path: |
+            src-tauri/target/release/bundle/**/*.msi
+            src-tauri/target/release/bundle/**/*-setup.exe
+            src-tauri/target/release/bundle/**/*.dmg
           if-no-files-found: error
 
   publish-release:
@@ -77,6 +80,27 @@ jobs:
         with:
           path: release-assets
           merge-multiple: true
+      - name: Prepare release assets
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${{ needs.validate-version.outputs.release_tag }}"
+          version="${version#v}"
+          mkdir -p publish-assets
+
+          exe="$(find release-assets -type f -name '*-setup.exe' -print -quit)"
+          msi="$(find release-assets -type f -name '*.msi' -print -quit)"
+          dmg="$(find release-assets -type f -name '*.dmg' -print -quit)"
+
+          test -n "$exe"
+          test -n "$msi"
+          test -n "$dmg"
+
+          cp "$exe" "publish-assets/Email-Triage-${version}-x64-setup.exe"
+          cp "$msi" "publish-assets/Email-Triage-${version}-x64-en-US.msi"
+          cp "$dmg" "publish-assets/Email-Triage-${version}-aarch64.dmg"
+
+          ls -lh publish-assets
       - name: Publish GitHub Release
         uses: softprops/action-gh-release@v2
         with:
@@ -84,6 +108,5 @@ jobs:
           target_commitish: ${{ github.sha }}
           name: Email Triage ${{ needs.validate-version.outputs.release_tag }}
           generate_release_notes: true
-          files: |
-            release-assets/**/*
+          files: publish-assets/*
           fail_on_unmatched_files: true
