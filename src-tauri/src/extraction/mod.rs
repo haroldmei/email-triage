@@ -14,21 +14,37 @@ pub struct DeterministicExtractor;
 impl IdentityExtractor for DeterministicExtractor {
     fn extract(&self, message: &ParsedMessage) -> StudentIdentity {
         let body = searchable_text(message);
-        let generic_name = capture(
+
+        let generic_name = capture_first(
             &body,
-            r"(?im)^\s*(?:student\s*name|applicant\s*name|学生姓名|姓名)\s*[:：]\s*([^\r\n]{2,120})\s*$",
+            &[
+                r"(?im)^[ \t]*(?:student\s*name|applicant\s*name|name\s*of\s*(?:student|applicant)|full\s*name|student|applicant|学生姓名|申请学生姓名|申请人姓名|申请人|学生|姓名)[ \t]*(?:[:：=\-])[ \t]*([^\r\n]{2,120})[ \t]*$",
+                r"(?im)^[ \t]*(?:student\s*name|applicant\s*name|name\s*of\s*(?:student|applicant)|full\s*name|学生姓名|申请学生姓名|申请人姓名|姓名)[ \t]{2,}([^\r\n]{2,120})[ \t]*$",
+                r"(?im)^[ \t]*(?:student\s*name|applicant\s*name|name\s*of\s*(?:student|applicant)|full\s*name|学生姓名|申请学生姓名|申请人姓名|姓名)[ \t]*(?:[:：])?[ \t]*\r?\n[ \t]*([^\r\n]{2,120})[ \t]*$",
+            ],
             "labeled student name",
             0.99,
-        );
-        let mut english_name = capture(
+        )
+        .or_else(|| name_from_attachment_filename(message));
+
+        let mut english_name = capture_first(
             &body,
-            r"(?im)^\s*(?:english\s*name|name\s*\(\s*english\s*\)|英文名|英文姓名)\s*[:：]\s*([^\r\n]{2,80})\s*$",
+            &[
+                r"(?im)^[ \t]*(?:english\s*(?:full\s*)?name|name\s*\(\s*english\s*\)|name\s*in\s*english|英文名|英文姓名)[ \t]*(?:[:：=\-])[ \t]*([^\r\n]{2,80})[ \t]*$",
+                r"(?im)^[ \t]*(?:english\s*(?:full\s*)?name|name\s*\(\s*english\s*\)|name\s*in\s*english|英文名|英文姓名)[ \t]{2,}([^\r\n]{2,80})[ \t]*$",
+                r"(?im)^[ \t]*(?:english\s*(?:full\s*)?name|name\s*\(\s*english\s*\)|name\s*in\s*english|英文名|英文姓名)[ \t]*(?:[:：])?[ \t]*\r?\n[ \t]*([^\r\n]{2,80})[ \t]*$",
+            ],
             "labeled English student name",
             0.99,
         );
-        let mut chinese_name = capture(
+
+        let mut chinese_name = capture_first(
             &body,
-            r"(?im)^\s*(?:chinese\s*name|name\s*\(\s*chinese\s*\)|中文名|中文姓名)\s*[:：]\s*([^\r\n]{2,40})\s*$",
+            &[
+                r"(?im)^[ \t]*(?:chinese\s*(?:full\s*)?name|name\s*\(\s*chinese\s*\)|name\s*in\s*chinese|中文名|中文姓名|姓名\s*\(\s*中文\s*\)|姓名（中文）)[ \t]*(?:[:：=\-])[ \t]*([^\r\n]{2,40})[ \t]*$",
+                r"(?im)^[ \t]*(?:chinese\s*(?:full\s*)?name|name\s*\(\s*chinese\s*\)|name\s*in\s*chinese|中文名|中文姓名|姓名\s*\(\s*中文\s*\)|姓名（中文）)[ \t]{2,}([^\r\n]{2,40})[ \t]*$",
+                r"(?im)^[ \t]*(?:chinese\s*(?:full\s*)?name|name\s*\(\s*chinese\s*\)|name\s*in\s*chinese|中文名|中文姓名|姓名\s*\(\s*中文\s*\)|姓名（中文）)[ \t]*(?:[:：])?[ \t]*\r?\n[ \t]*([^\r\n]{2,40})[ \t]*$",
+            ],
             "labeled Chinese student name",
             0.99,
         );
@@ -61,27 +77,39 @@ impl IdentityExtractor for DeterministicExtractor {
             name,
             english_name,
             chinese_name,
-            application_id: capture(
+            application_id: capture_first(
                 &body,
-                r"(?im)^\s*(?:student\s*(?:id|number)|application\s*(?:id|number|no\.?|ref(?:erence)?)|学号|申请号)\s*[:：#]?\s*([A-Z0-9][A-Z0-9._/-]{2,40})\s*$",
+                &[
+                    r"(?im)^[ \t]*(?:student\s*(?:id|number|no\.?|reference)|application\s*(?:id|number|no\.?|ref(?:erence)?)|学号|学生编号|申请号|申请编号|申请ID)[ \t]*[:：#=\-]?[ \t]*([A-Z0-9][A-Z0-9._/-]{2,40})[ \t]*$",
+                    r"(?im)^[ \t]*(?:student\s*(?:id|number|no\.?|reference)|application\s*(?:id|number|no\.?|ref(?:erence)?)|学号|学生编号|申请号|申请编号|申请ID)[ \t]*(?:[:：])?[ \t]*\r?\n[ \t]*([A-Z0-9][A-Z0-9._/-]{2,40})[ \t]*$",
+                ],
                 "labeled student/application identifier",
                 0.99,
             ),
-            date_of_birth: capture(
+            date_of_birth: capture_first(
                 &body,
-                r"(?im)^\s*(?:date\s*of\s*birth|dob|出生日期)\s*[:：]\s*([0-9]{1,4}[./-][0-9]{1,2}[./-][0-9]{1,4})\s*$",
+                &[
+                    r"(?im)^[ \t]*(?:date\s*of\s*birth|birth\s*date|dob|出生日期|生日)[ \t]*[:：=\-][ \t]*([0-9]{1,4}[./-][0-9]{1,2}[./-][0-9]{1,4})[ \t]*$",
+                    r"(?im)^[ \t]*(?:date\s*of\s*birth|birth\s*date|dob|出生日期|生日)[ \t]*(?:[:：])?[ \t]*\r?\n[ \t]*([0-9]{1,4}[./-][0-9]{1,2}[./-][0-9]{1,4})[ \t]*$",
+                ],
                 "labeled date of birth",
                 0.98,
             ),
-            university: capture(
+            university: capture_first(
                 &body,
-                r"(?im)^\s*(?:university|institution|school|院校|大学)\s*[:：]\s*([^\r\n]{2,120})\s*$",
+                &[
+                    r"(?im)^[ \t]*(?:university|institution|school|院校|学校|大学)[ \t]*[:：=\-][ \t]*([^\r\n]{2,120})[ \t]*$",
+                    r"(?im)^[ \t]*(?:university|institution|school|院校|学校|大学)[ \t]*(?:[:：])?[ \t]*\r?\n[ \t]*([^\r\n]{2,120})[ \t]*$",
+                ],
                 "labeled university",
                 0.95,
             ),
-            course: capture(
+            course: capture_first(
                 &body,
-                r"(?im)^\s*(?:course|program(?:me)?|degree|专业|课程)\s*[:：]\s*([^\r\n]{2,120})\s*$",
+                &[
+                    r"(?im)^[ \t]*(?:course|program(?:me)?|degree|major|专业|课程|项目)[ \t]*[:：=\-][ \t]*([^\r\n]{2,120})[ \t]*$",
+                    r"(?im)^[ \t]*(?:course|program(?:me)?|degree|major|专业|课程|项目)[ \t]*(?:[:：])?[ \t]*\r?\n[ \t]*([^\r\n]{2,120})[ \t]*$",
+                ],
                 "labeled course/program",
                 0.94,
             ),
@@ -107,6 +135,45 @@ fn searchable_text(message: &ParsedMessage) -> String {
         }
     }
     parts.join("\n")
+}
+
+fn name_from_attachment_filename(message: &ParsedMessage) -> Option<ExtractedValue> {
+    let labeled = Regex::new(
+        r"(?i)(?:student[-_ ]*name|applicant[-_ ]*name|name|学生姓名|申请人姓名|姓名)[-_ ：:=]+([\p{Han}]{2,4}|[A-Za-z][A-Za-z .'-]{1,60})",
+    )
+    .expect("constant attachment filename name regex");
+    let chinese_prefix = Regex::new(
+        r"^([\p{Han}]{2,4})[-_ ]+(?:护照|成绩单|申请|申请材料|简历|offer|cv|resume|passport|transcript)",
+    )
+    .expect("constant Chinese attachment filename regex");
+    let english_prefix = Regex::new(
+        r"(?i)^([A-Za-z][A-Za-z .'-]{2,60})[-_ ]+(?:offer|cv|resume|passport|transcript|application)",
+    )
+    .expect("constant English attachment filename regex");
+
+    for attachment in &message.attachments {
+        let stem = attachment
+            .filename
+            .rsplit_once('.')
+            .map(|(stem, _)| stem)
+            .unwrap_or(&attachment.filename);
+        for re in [&labeled, &chinese_prefix, &english_prefix] {
+            if let Some(captures) = re.captures(stem) {
+                let Some(value) = captures.get(1) else {
+                    continue;
+                };
+                let value = clean_name_candidate(value.as_str());
+                if is_plausible_name(&value) {
+                    return Some(ExtractedValue {
+                        value,
+                        confidence: 0.95,
+                        evidence: format!("attachment filename: {}", attachment.filename),
+                    });
+                }
+            }
+        }
+    }
+    None
 }
 
 fn extract_attachment_text(attachment: &Attachment) -> Option<String> {
@@ -184,25 +251,62 @@ fn split_bilingual_name(value: &str) -> (Option<String>, Option<String>) {
 
     let chinese = han_re
         .find(value)
-        .map(|m| m.as_str().trim().to_string())
-        .filter(|value| !value.is_empty());
+        .map(|m| clean_name_candidate(m.as_str()))
+        .filter(|value| is_plausible_name(value));
     let english = latin_re
         .find(value)
-        .map(|m| m.as_str().trim_matches(|ch: char| ch.is_whitespace() || "/|,;()（）".contains(ch)).to_string())
-        .filter(|value| value.chars().any(|ch| ch.is_alphabetic()) && !value.is_empty());
+        .map(|m| clean_name_candidate(m.as_str()))
+        .filter(|value| is_plausible_name(value));
     (english, chinese)
+}
+
+fn clean_name_candidate(value: &str) -> String {
+    value
+        .trim()
+        .trim_matches(|ch: char| ch.is_whitespace() || "/|,;()（）[]{}:：".contains(ch))
+        .to_string()
+}
+
+fn is_plausible_name(value: &str) -> bool {
+    let value = value.trim();
+    if value.len() < 2 || value.len() > 120 {
+        return false;
+    }
+    let lower = value.to_ascii_lowercase();
+    let blocked = [
+        "application",
+        "application form",
+        "passport",
+        "transcript",
+        "resume",
+        "curriculum vitae",
+        "申请材料",
+        "申请表",
+        "成绩单",
+        "护照",
+    ];
+    if blocked.iter().any(|item| lower == *item) {
+        return false;
+    }
+    value.chars().any(|ch| ch.is_alphabetic())
+}
+
+fn capture_first(
+    text: &str,
+    patterns: &[&str],
+    evidence: &str,
+    confidence: f32,
+) -> Option<ExtractedValue> {
+    patterns
+        .iter()
+        .find_map(|pattern| capture(text, pattern, evidence, confidence))
 }
 
 fn capture(text: &str, pattern: &str, evidence: &str, confidence: f32) -> Option<ExtractedValue> {
     let re = Regex::new(pattern).expect("constant extraction regex");
     let captures = re.captures(text)?;
-    let value = captures
-        .get(1)?
-        .as_str()
-        .trim()
-        .trim_matches(['\"', '\''])
-        .to_string();
-    if value.is_empty() {
+    let value = clean_name_candidate(captures.get(1)?.as_str());
+    if !is_plausible_name(&value) {
         return None;
     }
     Some(ExtractedValue {
@@ -274,7 +378,34 @@ mod tests {
     }
 
     #[test]
-    fn does_not_guess_an_unlabeled_name() {
+    fn extracts_name_from_adjacent_table_lines() {
+        let message = ParsedMessage {
+            text_body: "申请人姓名\n张伟\nName in English\nWei Zhang".into(),
+            ..Default::default()
+        };
+        let identity = DeterministicExtractor.extract(&message);
+        assert_eq!(identity.name.as_ref().unwrap().value, "张伟");
+        assert_eq!(identity.chinese_name.unwrap().value, "张伟");
+        assert_eq!(identity.english_name.unwrap().value, "Wei Zhang");
+    }
+
+    #[test]
+    fn extracts_name_from_common_filename_pattern() {
+        let message = ParsedMessage {
+            attachments: vec![Attachment {
+                filename: "张伟_护照.pdf".into(),
+                content_type: "application/pdf".into(),
+                bytes: Vec::new(),
+            }],
+            ..Default::default()
+        };
+        let identity = DeterministicExtractor.extract(&message);
+        assert_eq!(identity.name.as_ref().unwrap().value, "张伟");
+        assert_eq!(identity.chinese_name.unwrap().value, "张伟");
+    }
+
+    #[test]
+    fn does_not_guess_an_unlabeled_subject_name() {
         let message = ParsedMessage {
             subject: Some("Offer for Chang Rui".into()),
             text_body: "Please see attached offer.".into(),
