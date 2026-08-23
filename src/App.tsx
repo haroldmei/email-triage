@@ -192,7 +192,11 @@ export default function App() {
       await invoke('set_drive_root', { folderId: current.id });
       return reloadConfig();
     });
-    if (saved) setNotice(`Student root set to “${current.name}”.`);
+    if (saved) {
+      setNotice(
+        `Student root set to “${current.name}”. Student folders will be created automatically when a student is identified.`,
+      );
+    }
   }
 
   async function savePolling(seconds: number) {
@@ -364,7 +368,11 @@ export default function App() {
                       <span>📁</span> {folder.name}
                     </button>
                   ))}
-                  {!folders.length && <p className="muted">No child folders loaded.</p>}
+                  {!folders.length && (
+                    <p className="muted">
+                      No student folders yet. They will be created automatically under this root when a student is identified.
+                    </p>
+                  )}
                 </div>
                 {config.driveRootId && <p className="muted">Selected root ID: {config.driveRootId}</p>}
               </div>

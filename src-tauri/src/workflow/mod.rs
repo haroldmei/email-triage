@@ -153,7 +153,6 @@ pub async fn process_once(
         .map(|failure| fetch_failure_result(failure.uid, failure.error))
         .collect::<Vec<_>>();
 
-    // Parse first so messages without attachments can be completed locally without requiring Drive.
     let mut parsed = Vec::with_capacity(batch.messages.len());
     for fetched in batch.messages {
         let parse_started = Instant::now();
@@ -223,7 +222,7 @@ pub async fn process_once(
             "INFO",
             format!("stage=drive_folder_list root_id=\"{root_id}\" started"),
         );
-        let folders = drive
+        let mut folders = drive
             .list_folders(root_id)
             .await
             .map_err(|e| WorkflowError::Drive(e.to_string()))?;
@@ -231,28 +230,22 @@ pub async fn process_once(
             app,
             "INFO",
             format!(
-                "stage=drive_folder_list root_id=\"{root_id}\" completed folders={} elapsed_ms={}",
+                "stage=drive_folder_list root_id=\"{root_id}\" completed folders={} empty_root_allowed=true auto_create_student_folders=true elapsed_ms={}",
                 folders.len(),
                 folder_started.elapsed().as_millis()
             ),
         );
 
-        if folders.is_empty() {
-            logging::write(
-                app,
-                "ERROR",
-                format!(
-                    "stage=drive_folder_list root_id=\"{root_id}\" invalid_student_root=true reason=no_child_folders"
-                ),
-            );
-            return Err(WorkflowError::Drive(
-                "configured student root contains no child folders; choose the folder that directly contains the student folders"
-                    .into(),
-            ));
-        }
-
         for (fetched, message) in parsed {
-            let result = process_parsed_message(app, &drive, &folders, fetched, message).await;
+            let result = process_parsed_message(
+                app,
+                &drive,
+                root_id,
+                &mut folders,
+                fetched,
+                message,
+            )
+            .await;
             checkpoint_result(app, mail_config, listing.uid_validity, &result)?;
             results.push(result);
         }
@@ -363,7 +356,8 @@ fn no_attachment_result(uid: u32, message: ParsedMessage) -> ProcessingResult {
 async fn process_parsed_message(
     app: &AppHandle,
     drive: &DriveClient,
-    folders: &[DriveFile],
+    root_id: &str,
+    folders: &mut Vec<DriveFile>,
     fetched: FetchedMessage,
     message: ParsedMessage,
 ) -> ProcessingResult {
@@ -391,6 +385,27 @@ async fn process_parsed_message(
         ),
     );
 
+    let Some(preferred_name) = preferred_student_name(&identity) else {
+        logging::write(
+            app,
+            "WARN",
+            format!(
+                "stage=student_match uid={} not_found reason=no_high_confidence_identity available_folders={}",
+                fetched.uid,
+                folders.len()
+            ),
+        );
+        return review_result(
+            fetched.uid,
+            message.message_id.clone(),
+            message.subject.clone(),
+            None,
+            attachment_count,
+            "No high-confidence student name could be extracted; student folder was not created"
+                .into(),
+        );
+    };
+
     logging::write(
         app,
         "INFO",
@@ -398,17 +413,18 @@ async fn process_parsed_message(
             "stage=student_match uid={} started attachments={} student=\"{}\" available_folders={}",
             fetched.uid,
             attachment_count,
-            student_name.as_deref().unwrap_or("unknown"),
+            preferred_name.value,
             folders.len()
         ),
     );
+
     let folder = match match_student_folder(folders, &identity) {
         FolderMatch::Matched(folder) => {
             logging::write(
                 app,
                 "INFO",
                 format!(
-                    "stage=student_match uid={} matched folder=\"{}\" folder_id=\"{}\"",
+                    "stage=student_match uid={} matched folder=\"{}\" folder_id=\"{}\" created=false",
                     fetched.uid, folder.name, folder.id
                 ),
             );
@@ -442,24 +458,57 @@ async fn process_parsed_message(
             );
         }
         FolderMatch::NotFound => {
+            let create_started = Instant::now();
             logging::write(
                 app,
-                "WARN",
+                "INFO",
                 format!(
-                    "stage=student_match uid={} not_found identity_present={} available_folders={}",
-                    fetched.uid,
-                    student_name.is_some(),
-                    folders.len()
+                    "stage=student_folder_create uid={} root_id=\"{}\" student=\"{}\" started",
+                    fetched.uid, root_id, preferred_name.value
                 ),
             );
-            return review_result(
-                fetched.uid,
-                message.message_id.clone(),
-                message.subject.clone(),
-                student_name,
-                attachment_count,
-                "No unique student folder match was found".into(),
-            );
+            match drive.create_folder(root_id, &preferred_name.value).await {
+                Ok(folder) => {
+                    logging::write(
+                        app,
+                        "INFO",
+                        format!(
+                            "stage=student_folder_create uid={} student=\"{}\" folder_id=\"{}\" created=true elapsed_ms={}",
+                            fetched.uid,
+                            folder.name,
+                            folder.id,
+                            create_started.elapsed().as_millis()
+                        ),
+                    );
+                    folders.push(folder.clone());
+                    folder
+                }
+                Err(error) => {
+                    logging::write(
+                        app,
+                        "ERROR",
+                        format!(
+                            "stage=student_folder_create uid={} student=\"{}\" failed elapsed_ms={} error=\"{}\"",
+                            fetched.uid,
+                            preferred_name.value,
+                            create_started.elapsed().as_millis(),
+                            error
+                        ),
+                    );
+                    return failed_result(
+                        fetched.uid,
+                        &message,
+                        student_name,
+                        None,
+                        None,
+                        attachment_count,
+                        Vec::new(),
+                        Vec::new(),
+                        Vec::new(),
+                        format!("Could not create student Drive folder: {error}"),
+                    );
+                }
+            }
         }
     };
 
@@ -907,6 +956,19 @@ mod tests {
         assert!(matches!(
             match_student_folder(&folders, &identity),
             FolderMatch::Ambiguous(values) if values.len() == 2
+        ));
+    }
+
+    #[test]
+    fn empty_root_allows_folder_creation_path() {
+        let identity = StudentIdentity {
+            name: Some(extracted("张伟")),
+            chinese_name: Some(extracted("张伟")),
+            ..Default::default()
+        };
+        assert!(matches!(
+            match_student_folder(&[], &identity),
+            FolderMatch::NotFound
         ));
     }
 
