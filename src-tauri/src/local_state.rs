@@ -8,6 +8,7 @@ use tauri::{AppHandle, Manager};
 use crate::models::{MailConfig, ProcessingStatus};
 
 const STATE_FILE: &str = "processing-state.json";
+const EXTRACTOR_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
@@ -21,6 +22,8 @@ struct ProcessingLedger {
 struct ProcessingEntry {
     status: String,
     processed_at: String,
+    #[serde(default)]
+    extractor_version: Option<String>,
 }
 
 pub fn state_path(app: &AppHandle) -> Result<PathBuf, String> {
@@ -55,9 +58,10 @@ pub fn select_pending_uids(
         .iter()
         .copied()
         .filter(|uid| {
-            !ledger
+            ledger
                 .entries
-                .contains_key(&message_key(mail, uid_validity, *uid))
+                .get(&message_key(mail, uid_validity, *uid))
+                .is_none_or(|entry| !is_terminal_for_current_extractor(entry))
         })
         .collect::<Vec<_>>();
     let skipped_terminal = all_uids.len().saturating_sub(pending.len());
@@ -87,9 +91,17 @@ pub fn mark_terminal(
         ProcessingEntry {
             status: status.to_string(),
             processed_at: Local::now().to_rfc3339(),
+            extractor_version: Some(EXTRACTOR_VERSION.to_string()),
         },
     );
     save(app, &ledger)
+}
+
+fn is_terminal_for_current_extractor(entry: &ProcessingEntry) -> bool {
+    if entry.status != "needs_review" {
+        return true;
+    }
+    entry.extractor_version.as_deref() == Some(EXTRACTOR_VERSION)
 }
 
 fn load(app: &AppHandle) -> Result<ProcessingLedger, String> {
@@ -140,5 +152,35 @@ mod tests {
             mailbox: "INBOX".into(),
         };
         assert_ne!(message_key(&mail, 1, 42), message_key(&mail, 2, 42));
+    }
+
+    #[test]
+    fn old_needs_review_is_retryable_after_extractor_upgrade() {
+        let entry = ProcessingEntry {
+            status: "needs_review".into(),
+            processed_at: "2026-01-01T00:00:00Z".into(),
+            extractor_version: Some("0.1.15".into()),
+        };
+        assert!(!is_terminal_for_current_extractor(&entry));
+    }
+
+    #[test]
+    fn current_needs_review_remains_terminal() {
+        let entry = ProcessingEntry {
+            status: "needs_review".into(),
+            processed_at: "2026-01-01T00:00:00Z".into(),
+            extractor_version: Some(EXTRACTOR_VERSION.into()),
+        };
+        assert!(is_terminal_for_current_extractor(&entry));
+    }
+
+    #[test]
+    fn uploaded_entries_remain_terminal_across_versions() {
+        let entry = ProcessingEntry {
+            status: "uploaded".into(),
+            processed_at: "2026-01-01T00:00:00Z".into(),
+            extractor_version: None,
+        };
+        assert!(is_terminal_for_current_extractor(&entry));
     }
 }
