@@ -15,7 +15,7 @@ impl IdentityExtractor for DeterministicExtractor {
     fn extract(&self, message: &ParsedMessage) -> StudentIdentity {
         let body = searchable_text(message);
 
-        let generic_name = capture_first(
+        let generic_name = capture_name_first(
             &body,
             &[
                 r"(?im)^[ \t]*(?:student\s*name|applicant\s*name|name\s*of\s*(?:student|applicant)|full\s*name|student|applicant|学生姓名|申请学生姓名|申请人姓名|申请人|学生|姓名)[ \t]*(?:[:：=\-])[ \t]*([^\r\n]{2,120})[ \t]*$",
@@ -27,7 +27,7 @@ impl IdentityExtractor for DeterministicExtractor {
         )
         .or_else(|| name_from_attachment_filename(message));
 
-        let mut english_name = capture_first(
+        let mut english_name = capture_name_first(
             &body,
             &[
                 r"(?im)^[ \t]*(?:english\s*(?:full\s*)?name|name\s*\(\s*english\s*\)|name\s*in\s*english|英文名|英文姓名)[ \t]*(?:[:：=\-])[ \t]*([^\r\n]{2,80})[ \t]*$",
@@ -38,7 +38,7 @@ impl IdentityExtractor for DeterministicExtractor {
             0.99,
         );
 
-        let mut chinese_name = capture_first(
+        let mut chinese_name = capture_name_first(
             &body,
             &[
                 r"(?im)^[ \t]*(?:chinese\s*(?:full\s*)?name|name\s*\(\s*chinese\s*\)|name\s*in\s*chinese|中文名|中文姓名|姓名\s*\(\s*中文\s*\)|姓名（中文）)[ \t]*(?:[:：=\-])[ \t]*([^\r\n]{2,40})[ \t]*$",
@@ -67,7 +67,6 @@ impl IdentityExtractor for DeterministicExtractor {
             }
         }
 
-        // Chinese is the canonical student name. English is only a fallback.
         let name = chinese_name
             .clone()
             .or_else(|| english_name.clone())
@@ -77,7 +76,7 @@ impl IdentityExtractor for DeterministicExtractor {
             name,
             english_name,
             chinese_name,
-            application_id: capture_first(
+            application_id: capture_value_first(
                 &body,
                 &[
                     r"(?im)^[ \t]*(?:student\s*(?:id|number|no\.?|reference)|application\s*(?:id|number|no\.?|ref(?:erence)?)|学号|学生编号|申请号|申请编号|申请ID)[ \t]*[:：#=\-]?[ \t]*([A-Z0-9][A-Z0-9._/-]{2,40})[ \t]*$",
@@ -86,7 +85,7 @@ impl IdentityExtractor for DeterministicExtractor {
                 "labeled student/application identifier",
                 0.99,
             ),
-            date_of_birth: capture_first(
+            date_of_birth: capture_value_first(
                 &body,
                 &[
                     r"(?im)^[ \t]*(?:date\s*of\s*birth|birth\s*date|dob|出生日期|生日)[ \t]*[:：=\-][ \t]*([0-9]{1,4}[./-][0-9]{1,2}[./-][0-9]{1,4})[ \t]*$",
@@ -95,7 +94,7 @@ impl IdentityExtractor for DeterministicExtractor {
                 "labeled date of birth",
                 0.98,
             ),
-            university: capture_first(
+            university: capture_value_first(
                 &body,
                 &[
                     r"(?im)^[ \t]*(?:university|institution|school|院校|学校|大学)[ \t]*[:：=\-][ \t]*([^\r\n]{2,120})[ \t]*$",
@@ -104,7 +103,7 @@ impl IdentityExtractor for DeterministicExtractor {
                 "labeled university",
                 0.95,
             ),
-            course: capture_first(
+            course: capture_value_first(
                 &body,
                 &[
                     r"(?im)^[ \t]*(?:course|program(?:me)?|degree|major|专业|课程|项目)[ \t]*[:：=\-][ \t]*([^\r\n]{2,120})[ \t]*$",
@@ -267,6 +266,13 @@ fn clean_name_candidate(value: &str) -> String {
         .to_string()
 }
 
+fn clean_value(value: &str) -> String {
+    value
+        .trim()
+        .trim_matches(['\"', '\''])
+        .to_string()
+}
+
 fn is_plausible_name(value: &str) -> bool {
     let value = value.trim();
     if value.len() < 2 || value.len() > 120 {
@@ -291,7 +297,7 @@ fn is_plausible_name(value: &str) -> bool {
     value.chars().any(|ch| ch.is_alphabetic())
 }
 
-fn capture_first(
+fn capture_name_first(
     text: &str,
     patterns: &[&str],
     evidence: &str,
@@ -299,13 +305,28 @@ fn capture_first(
 ) -> Option<ExtractedValue> {
     patterns
         .iter()
-        .find_map(|pattern| capture(text, pattern, evidence, confidence))
+        .find_map(|pattern| capture_name(text, pattern, evidence, confidence))
 }
 
-fn capture(text: &str, pattern: &str, evidence: &str, confidence: f32) -> Option<ExtractedValue> {
-    let re = Regex::new(pattern).expect("constant extraction regex");
-    let captures = re.captures(text)?;
-    let value = clean_name_candidate(captures.get(1)?.as_str());
+fn capture_value_first(
+    text: &str,
+    patterns: &[&str],
+    evidence: &str,
+    confidence: f32,
+) -> Option<ExtractedValue> {
+    patterns
+        .iter()
+        .find_map(|pattern| capture_value(text, pattern, evidence, confidence))
+}
+
+fn capture_name(
+    text: &str,
+    pattern: &str,
+    evidence: &str,
+    confidence: f32,
+) -> Option<ExtractedValue> {
+    let value = capture_raw(text, pattern)?;
+    let value = clean_name_candidate(&value);
     if !is_plausible_name(&value) {
         return None;
     }
@@ -314,6 +335,30 @@ fn capture(text: &str, pattern: &str, evidence: &str, confidence: f32) -> Option
         confidence,
         evidence: evidence.to_string(),
     })
+}
+
+fn capture_value(
+    text: &str,
+    pattern: &str,
+    evidence: &str,
+    confidence: f32,
+) -> Option<ExtractedValue> {
+    let value = clean_value(&capture_raw(text, pattern)?);
+    if value.is_empty() {
+        return None;
+    }
+    Some(ExtractedValue {
+        value,
+        confidence,
+        evidence: evidence.to_string(),
+    })
+}
+
+fn capture_raw(text: &str, pattern: &str) -> Option<String> {
+    let re = Regex::new(pattern).expect("constant extraction regex");
+    re.captures(text)?
+        .get(1)
+        .map(|value| value.as_str().to_string())
 }
 
 #[cfg(test)]
@@ -402,6 +447,17 @@ mod tests {
         let identity = DeterministicExtractor.extract(&message);
         assert_eq!(identity.name.as_ref().unwrap().value, "张伟");
         assert_eq!(identity.chinese_name.unwrap().value, "张伟");
+    }
+
+    #[test]
+    fn keeps_numeric_date_and_identifier_fields() {
+        let message = ParsedMessage {
+            text_body: "申请号: 99881234\n出生日期: 2001-05-17".into(),
+            ..Default::default()
+        };
+        let identity = DeterministicExtractor.extract(&message);
+        assert_eq!(identity.application_id.unwrap().value, "99881234");
+        assert_eq!(identity.date_of_birth.unwrap().value, "2001-05-17");
     }
 
     #[test]
