@@ -58,23 +58,44 @@ pub fn read_recent(app: &AppHandle, max_lines: usize) -> Result<Vec<String>, Str
 }
 
 pub fn write_processing_results(app: &AppHandle, source: &str, results: &[ProcessingResult]) {
+    let version = env!("CARGO_PKG_VERSION");
     if results.is_empty() {
         write(
             app,
             "INFO",
-            format!("source={source} mailbox_check candidate_messages=0"),
+            format!(
+                "version={version} source={source} stage=batch_summary action=\"Mailbox check finished; no candidate messages required processing\" candidate_messages=0 uploaded=0 processed_no_attachments=0 needs_review=0 failed=0 attachments_found=0 files_uploaded=0 skipped_existing=0"
+            ),
         );
         return;
     }
 
     for result in results {
-        let (level, status, local_state) = match result.status {
-            ProcessingStatus::Uploaded => ("INFO", "uploaded", "completed"),
-            ProcessingStatus::ProcessedNoAttachments => {
-                ("INFO", "processed_no_attachments", "completed")
-            }
-            ProcessingStatus::NeedsReview => ("WARN", "needs_review", "needs_review"),
-            ProcessingStatus::Failed => ("ERROR", "failed", "retryable"),
+        let (level, status, local_state, explanation) = match result.status {
+            ProcessingStatus::Uploaded => (
+                "INFO",
+                "uploaded",
+                "completed",
+                "Attachments were filed in Google Drive",
+            ),
+            ProcessingStatus::ProcessedNoAttachments => (
+                "INFO",
+                "processed_no_attachments",
+                "completed",
+                "Message contained no attachments; no Drive upload was needed",
+            ),
+            ProcessingStatus::NeedsReview => (
+                "WARN",
+                "needs_review",
+                "needs_review",
+                "Automatic filing stopped because a safe student identity or folder decision was unavailable",
+            ),
+            ProcessingStatus::Failed => (
+                "ERROR",
+                "failed",
+                "retryable",
+                "Processing failed and should be retried",
+            ),
         };
 
         let student = quoted(result.student_name.as_deref().unwrap_or("unknown"));
@@ -83,35 +104,60 @@ pub fn write_processing_results(app: &AppHandle, source: &str, results: &[Proces
         let uploaded = quoted_list(&result.uploaded_file_names);
         let skipped = quoted_list(&result.skipped_existing_files);
         let detail = quoted(&result.detail);
+        let explanation = quoted(explanation);
 
         write(
             app,
             level,
             format!(
-                "source={source} uid={} status={status} student={student} attachments={} folder={folder} folder_id={folder_id} uploaded={uploaded} skipped_existing={skipped} local_state={local_state} mail_server_mutated=false detail={detail}",
-                result.uid, result.attachment_count
+                "version={version} source={source} stage=result_summary action=\"Message processing result\" uid={} status={status} student={student} attachments_found={} drive_folder={folder} drive_folder_id={folder_id} files_uploaded_count={} files_uploaded={uploaded} skipped_existing_count={} skipped_existing={skipped} local_state={local_state} mail_server_mutated=false explanation={explanation} detail={detail}",
+                result.uid,
+                result.attachment_count,
+                result.uploaded_file_names.len(),
+                result.skipped_existing_files.len()
             ),
         );
     }
+
+    let uploaded = results
+        .iter()
+        .filter(|result| matches!(result.status, ProcessingStatus::Uploaded))
+        .count();
+    let no_attachments = results
+        .iter()
+        .filter(|result| matches!(result.status, ProcessingStatus::ProcessedNoAttachments))
+        .count();
+    let needs_review = results
+        .iter()
+        .filter(|result| matches!(result.status, ProcessingStatus::NeedsReview))
+        .count();
+    let failed = results
+        .iter()
+        .filter(|result| matches!(result.status, ProcessingStatus::Failed))
+        .count();
+    let attachments_found: usize = results.iter().map(|result| result.attachment_count).sum();
+    let files_uploaded: usize = results
+        .iter()
+        .map(|result| result.uploaded_file_names.len())
+        .sum();
+    let skipped_existing: usize = results
+        .iter()
+        .map(|result| result.skipped_existing_files.len())
+        .sum();
 
     write(
         app,
         "INFO",
         format!(
-            "source={source} mailbox_check candidate_messages={} uploaded={} needs_review={} failed={}",
+            "version={version} source={source} stage=batch_summary action=\"Mailbox check processing summary\" candidate_messages={} uploaded={} processed_no_attachments={} needs_review={} failed={} attachments_found={} files_uploaded={} skipped_existing={}",
             results.len(),
-            results
-                .iter()
-                .filter(|result| matches!(result.status, ProcessingStatus::Uploaded))
-                .count(),
-            results
-                .iter()
-                .filter(|result| matches!(result.status, ProcessingStatus::NeedsReview))
-                .count(),
-            results
-                .iter()
-                .filter(|result| matches!(result.status, ProcessingStatus::Failed))
-                .count(),
+            uploaded,
+            no_attachments,
+            needs_review,
+            failed,
+            attachments_found,
+            files_uploaded,
+            skipped_existing
         ),
     );
 }
