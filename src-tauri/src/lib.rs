@@ -178,7 +178,10 @@ async fn process_now(
             logging::write(
                 &app,
                 "INFO",
-                format!("source=manual mailbox_check mailbox=\"{mailbox}\" completed elapsed_ms={}", started.elapsed().as_millis()),
+                format!(
+                    "source=manual mailbox_check mailbox=\"{mailbox}\" completed elapsed_ms={}",
+                    started.elapsed().as_millis()
+                ),
             );
             Ok(results)
         }
@@ -186,7 +189,10 @@ async fn process_now(
             logging::write(
                 &app,
                 "ERROR",
-                format!("source=manual mailbox_check mailbox=\"{mailbox}\" failed elapsed_ms={} error=\"{error}\"", started.elapsed().as_millis()),
+                format!(
+                    "source=manual mailbox_check mailbox=\"{mailbox}\" failed elapsed_ms={} error=\"{error}\"",
+                    started.elapsed().as_millis()
+                ),
             );
             Err(error.to_string())
         }
@@ -194,7 +200,11 @@ async fn process_now(
             logging::write(
                 &app,
                 "ERROR",
-                format!("source=manual mailbox_check mailbox=\"{mailbox}\" timed_out seconds={} elapsed_ms={}", scheduler::PROCESSING_TIMEOUT.as_secs(), started.elapsed().as_millis()),
+                format!(
+                    "source=manual mailbox_check mailbox=\"{mailbox}\" timed_out seconds={} elapsed_ms={}",
+                    scheduler::PROCESSING_TIMEOUT.as_secs(),
+                    started.elapsed().as_millis()
+                ),
             );
             Err(format!(
                 "Email processing timed out after {} seconds. Check the local app log for the last completed stage.",
@@ -273,26 +283,28 @@ pub fn run() {
                 None,
             ))?;
 
-            let (state_path, state_exists, state_entries) = match local_state::ensure_exists(app.handle()) {
-                Ok(path) => {
-                    let entries = local_state::entry_count(app.handle()).unwrap_or_default();
-                    (path.display().to_string(), true, entries)
-                }
-                Err(error) => {
-                    logging::write(
-                        app.handle(),
-                        "ERROR",
-                        format!("stage=local_state initialize_failed error=\"{error}\""),
-                    );
-                    ("unavailable".into(), false, 0)
-                }
-            };
+            let (state_path, state_exists, state_entries) =
+                match local_state::ensure_exists(app.handle()) {
+                    Ok(path) => {
+                        let entries = local_state::entry_count(app.handle()).unwrap_or_default();
+                        (path.display().to_string(), true, entries)
+                    }
+                    Err(error) => {
+                        logging::write(
+                            app.handle(),
+                            "ERROR",
+                            format!("stage=local_state initialize_failed error=\"{error}\""),
+                        );
+                        ("unavailable".into(), false, 0)
+                    }
+                };
 
             logging::write(
                 app.handle(),
                 "INFO",
                 format!(
-                    "Email Triage started processing_state=idle mail_access=read_only local_state=\"{state_path}\" local_state_exists={state_exists} local_state_entries={state_entries} message_fetch_timeout_seconds={} processing_watchdog_seconds={}",
+                    "Email Triage started version={} processing_state=idle mail_access=read_only local_state=\"{state_path}\" local_state_exists={state_exists} local_state_entries={state_entries} message_fetch_timeout_seconds={} processing_watchdog_seconds={}",
+                    env!("CARGO_PKG_VERSION"),
                     mail::MESSAGE_FETCH_TIMEOUT.as_secs(),
                     scheduler::PROCESSING_TIMEOUT.as_secs()
                 ),
