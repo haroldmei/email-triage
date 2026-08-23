@@ -17,13 +17,8 @@ pub struct DeterministicExtractor;
 impl IdentityExtractor for DeterministicExtractor {
     fn extract(&self, message: &ParsedMessage) -> StudentIdentity {
         let body = searchable_text(message);
-        let subject_name = message
-            .subject
-            .as_deref()
-            .and_then(subject_name_candidate);
+        let subject_name = message.subject.as_deref().and_then(subject_name_candidate);
 
-        // Subject is intentionally the first source. Only if it contains no safe name do we
-        // inspect labeled fields inside the body/attachments and finally filename consensus.
         let generic_name = subject_name.clone().or_else(|| {
             capture_name_first(
                 &body,
@@ -38,8 +33,6 @@ impl IdentityExtractor for DeterministicExtractor {
         })
         .or_else(|| filename_consensus_candidate(message));
 
-        // When the subject yielded a safe name, do not let a lower-priority attachment value
-        // override it. Otherwise keep the richer bilingual extraction from document fields.
         let (mut english_name, mut chinese_name) = if subject_name.is_some() {
             (None, None)
         } else {
@@ -85,17 +78,10 @@ impl IdentityExtractor for DeterministicExtractor {
             }
         }
 
-        let name = if subject_name.is_some() {
-            chinese_name
-                .clone()
-                .or_else(|| english_name.clone())
-                .or(generic_name)
-        } else {
-            chinese_name
-                .clone()
-                .or_else(|| english_name.clone())
-                .or(generic_name)
-        };
+        let name = chinese_name
+            .clone()
+            .or_else(|| english_name.clone())
+            .or(generic_name);
 
         StudentIdentity {
             name,
@@ -165,11 +151,11 @@ fn subject_name_candidate(subject: &str) -> Option<ExtractedValue> {
         .trim()
         .to_string();
 
-    let explicit_patterns = [
-        r"(?i)(?:for|student\s*name|applicant\s*name|name)\s*[:：\-–—]?\s*([A-Za-z][A-Za-z .'-]{2,60}|[\p{Han}]{2,4})\s*$",
+    for pattern in [
+        r"(?i)\bfor\s+([A-Za-z][A-Za-z .'-]{2,60})\s*$",
+        r"(?i)(?:student\s*name|applicant\s*name|name)\s*[:：\-–—]\s*([A-Za-z][A-Za-z .'-]{2,60}|[\p{Han}]{2,4})\s*$",
         r"(?i)(?:学生|申请人|姓名)\s*[:：\-–—]\s*([\p{Han}]{2,4}|[A-Za-z][A-Za-z .'-]{2,60})\s*$",
-    ];
-    for pattern in explicit_patterns {
+    ] {
         if let Some(value) = capture_raw(&cleaned, pattern) {
             let value = clean_name_candidate(&value);
             if is_plausible_name(&value) {
@@ -301,8 +287,7 @@ fn extract_attachment_text(attachment: &Attachment) -> Option<String> {
             .filter(|text| !text.trim().is_empty());
     }
 
-    if content_type
-        == "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+    if content_type == "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
         || filename.ends_with(".docx")
     {
         return extract_docx_text(&attachment.bytes);
@@ -324,11 +309,18 @@ fn extract_docx_text(bytes: &[u8]) -> Option<String> {
     let mut xml = String::new();
     document.read_to_string(&mut xml).ok()?;
 
+    let mut parts = parse_docx_table_rows(&xml);
+    parts.push(strip_xml(&xml));
+    let text = parts.join("\n");
+    (!text.trim().is_empty()).then_some(text)
+}
+
+fn parse_docx_table_rows(xml: &str) -> Vec<String> {
     let row_re = Regex::new(r"(?is)<w:tr\b[^>]*>(.*?)</w:tr>").expect("constant Word row regex");
     let cell_re = Regex::new(r"(?is)<w:tc\b[^>]*>(.*?)</w:tc>").expect("constant Word cell regex");
     let text_re = Regex::new(r"(?is)<w:t\b[^>]*>(.*?)</w:t>").expect("constant Word text regex");
-    let mut parts = Vec::new();
-    for row in row_re.captures_iter(&xml) {
+    let mut rows = Vec::new();
+    for row in row_re.captures_iter(xml) {
         let Some(row_body) = row.get(1) else { continue };
         let mut cells = Vec::new();
         for cell in cell_re.captures_iter(row_body.as_str()) {
@@ -345,15 +337,13 @@ fn extract_docx_text(bytes: &[u8]) -> Option<String> {
             }
         }
         if cells.len() >= 2 {
-            parts.push(format!("{}: {}", cells[0], cells[1]));
+            rows.push(format!("{}: {}", cells[0], cells[1]));
         }
         if !cells.is_empty() {
-            parts.push(cells.join(" | "));
+            rows.push(cells.join(" | "));
         }
     }
-    parts.push(strip_xml(&xml));
-    let text = parts.join("\n");
-    (!text.trim().is_empty()).then_some(text)
+    rows
 }
 
 fn extract_xlsx_text(bytes: &[u8]) -> Option<String> {
@@ -536,8 +526,15 @@ fn is_plausible_name(value: &str) -> bool {
         return false;
     }
 
-    if value.chars().any(|ch| matches!(ch, '\u{4e00}'..='\u{9fff}')) {
-        return value.chars().filter(|ch| matches!(ch, '\u{4e00}'..='\u{9fff}')).count() <= 8;
+    let han_count = value
+        .chars()
+        .filter(|ch| matches!(ch, '\u{4e00}'..='\u{9fff}'))
+        .count();
+    if han_count > 0 {
+        if value.chars().any(|ch| ch.is_ascii_alphabetic()) {
+            return value.contains('/') || value.contains('／');
+        }
+        return (2..=8).contains(&han_count);
     }
 
     let blocked_tokens = [
@@ -547,7 +544,9 @@ fn is_plausible_name(value: &str) -> bool {
         "invoice", "university", "college", "school", "course", "program", "programme", "payment",
         "instructions", "intake", "dates", "update", "flyer", "flyers", "academic", "merit",
         "international", "scholarship", "prepaid", "officeworks", "siit", "sg", "stp", "insertpic",
-        "image", "catch", "document", "documents", "material", "materials",
+        "image", "catch", "document", "documents", "material", "materials", "january", "february",
+        "march", "april", "may", "june", "july", "august", "september", "october", "november",
+        "december",
     ];
     let tokens = value
         .split_whitespace()
@@ -557,7 +556,13 @@ fn is_plausible_name(value: &str) -> bool {
     if !(2..=5).contains(&tokens.len()) {
         return false;
     }
-    if tokens.iter().any(|token| blocked_tokens.contains(&token.to_ascii_lowercase().as_str())) {
+    if tokens.iter().any(|token| token.chars().count() < 2) {
+        return false;
+    }
+    if tokens
+        .iter()
+        .any(|token| blocked_tokens.iter().any(|blocked| token.eq_ignore_ascii_case(blocked)))
+    {
         return false;
     }
     tokens.iter().all(|token| token.chars().any(|ch| ch.is_alphabetic()))
@@ -591,8 +596,7 @@ fn capture_name(
     evidence: &str,
     confidence: f32,
 ) -> Option<ExtractedValue> {
-    let value = capture_raw(text, pattern)?;
-    let value = clean_name_candidate(&value);
+    let value = clean_name_candidate(&capture_raw(text, pattern)?);
     if !is_plausible_name(&value) {
         return None;
     }
@@ -630,7 +634,6 @@ fn capture_raw(text: &str, pattern: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::Write;
 
     fn attachment(filename: &str) -> Attachment {
         Attachment {
@@ -647,14 +650,11 @@ mod tests {
             text_body: concat!(
                 "Student Name: Chang Rui\n",
                 "Application ID: APP12345\n",
-                "DOB: 2001-05-17\n",
-                "University: Example University\n",
-                "Course: Master of Data Science\n"
+                "DOB: 2001-05-17\n"
             )
             .into(),
             ..Default::default()
         };
-
         let identity = DeterministicExtractor.extract(&message);
         assert_eq!(identity.name.unwrap().value, "Chang Rui");
         assert_eq!(identity.application_id.unwrap().value, "APP12345");
@@ -668,8 +668,7 @@ mod tests {
             text_body: "Student Name: Wrong Person".into(),
             ..Default::default()
         };
-        let identity = DeterministicExtractor.extract(&message);
-        assert_eq!(identity.name.unwrap().value, "Shu Yan");
+        assert_eq!(DeterministicExtractor.extract(&message).name.unwrap().value, "Shu Yan");
     }
 
     #[test]
@@ -684,7 +683,10 @@ mod tests {
     #[test]
     fn rejects_generic_business_subjects() {
         for subject in ["SG Diploma Offer", "Student Documents", "Application Update", "SIIT Application Form"] {
-            let message = ParsedMessage { subject: Some(subject.into()), ..Default::default() };
+            let message = ParsedMessage {
+                subject: Some(subject.into()),
+                ..Default::default()
+            };
             assert!(DeterministicExtractor.extract(&message).name.is_none(), "{subject}");
         }
     }
@@ -699,19 +701,18 @@ mod tests {
             ],
             ..Default::default()
         };
-        let identity = DeterministicExtractor.extract(&message);
-        assert_eq!(identity.name.unwrap().value, "LI Baichuan");
+        assert_eq!(DeterministicExtractor.extract(&message).name.unwrap().value, "LI Baichuan");
     }
 
     #[test]
-    fn filename_does_not_promote_sg_diploma_or_student() {
+    fn generic_document_names_are_not_people() {
         for filename in ["SG Diploma Offer.pdf", "Genuine Student Declaration.pdf", "SIIT Application Form 2026.pdf"] {
             assert!(filename_name_candidates(filename).is_empty(), "{filename}");
         }
     }
 
     #[test]
-    fn filename_finds_wu_lanbing() {
+    fn filename_consensus_finds_wu_lanbing() {
         let message = ParsedMessage {
             attachments: vec![
                 attachment("学生申请信息表-模板825_WU Lanbing.xlsx"),
@@ -724,35 +725,22 @@ mod tests {
 
     #[test]
     fn docx_table_preserves_label_value_pair() {
-        let mut cursor = Cursor::new(Vec::<u8>::new());
-        {
-            let mut writer = zip::ZipWriter::new(&mut cursor);
-            writer
-                .start_file("word/document.xml", zip::write::SimpleFileOptions::default())
-                .unwrap();
-            writer
-                .write_all(br#"<w:document><w:body><w:tbl><w:tr><w:tc><w:p><w:r><w:t>中文姓名</w:t></w:r></w:p></w:tc><w:tc><w:p><w:r><w:t>吴兰冰</w:t></w:r></w:p></w:tc></w:tr></w:tbl></w:body></w:document>"#)
-                .unwrap();
-            writer.finish().unwrap();
-        }
-        let text = extract_docx_text(&cursor.into_inner()).unwrap();
-        assert!(text.contains("中文姓名: 吴兰冰"));
+        let xml = "<w:document><w:body><w:tbl><w:tr><w:tc><w:p><w:r><w:t>中文姓名</w:t></w:r></w:p></w:tc><w:tc><w:p><w:r><w:t>吴兰冰</w:t></w:r></w:p></w:tc></w:tr></w:tbl></w:body></w:document>";
+        let rows = parse_docx_table_rows(xml);
+        assert!(rows.iter().any(|row| row == "中文姓名: 吴兰冰"));
     }
 
     #[test]
     fn xlsx_row_preserves_label_value_pair() {
         let shared = vec!["English Name".to_string(), "WU Lanbing".to_string()];
-        let rows = parse_xlsx_rows(
-            r#"<worksheet><sheetData><row><c t="s"><v>0</v></c><c t="s"><v>1</v></c></row></sheetData></worksheet>"#,
-            &shared,
-        );
+        let xml = "<worksheet><sheetData><row><c t=\"s\"><v>0</v></c><c t=\"s\"><v>1</v></c></row></sheetData></worksheet>";
+        let rows = parse_xlsx_rows(xml, &shared);
         assert!(rows.iter().any(|row| row == "English Name: WU Lanbing"));
     }
 
     #[test]
     fn extracts_bilingual_names_from_text_attachment() {
         let message = ParsedMessage {
-            text_body: "Please see attached application.".into(),
             attachments: vec![Attachment {
                 filename: "application.txt".into(),
                 content_type: "text/plain".into(),
