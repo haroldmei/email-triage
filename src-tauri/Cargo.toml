@@ -1,6 +1,6 @@
 [package]
 name = "email-triage"
-version = "0.1.14"
+version = "0.1.15"
 description = "Local-first email triage desktop app"
 authors = ["Email Triage contributors"]
 edition = "2021"
@@ -32,6 +32,6 @@ url = "2"
 open = "5"
 sha2 = "0.10"
 hex = "0.4"
-pdf-extract = "0.12"
+pdf-extract = { package = "email-triage-pdf-extract-safe", path = "pdf-extract-safe" }
 zip = { version = "8.6", default-features = false, features = ["deflate"] }
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
