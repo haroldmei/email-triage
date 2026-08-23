@@ -30,6 +30,19 @@ pub fn state_path(app: &AppHandle) -> Result<PathBuf, String> {
         .map_err(|e| format!("could not resolve local processing state directory: {e}"))
 }
 
+pub fn ensure_exists(app: &AppHandle) -> Result<PathBuf, String> {
+    let path = state_path(app)?;
+    if path.exists() {
+        return Ok(path);
+    }
+    save(app, &ProcessingLedger::default())?;
+    Ok(path)
+}
+
+pub fn entry_count(app: &AppHandle) -> Result<usize, String> {
+    Ok(load(app)?.entries.len())
+}
+
 pub fn select_pending_uids(
     app: &AppHandle,
     mail: &MailConfig,
@@ -82,6 +95,7 @@ pub fn mark_terminal(
 fn load(app: &AppHandle) -> Result<ProcessingLedger, String> {
     let path = state_path(app)?;
     if !path.exists() {
+        save(app, &ProcessingLedger::default())?;
         return Ok(ProcessingLedger::default());
     }
     let bytes = fs::read(&path)
