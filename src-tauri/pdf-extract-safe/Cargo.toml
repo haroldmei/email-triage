@@ -1,0 +1,11 @@
+[package]
+name = "email-triage-pdf-extract-safe"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "pdf_extract"
+path = "src/lib.rs"
+
+[dependencies]
+pdf-extract-upstream = { package = "pdf-extract", version = "0.12" }
