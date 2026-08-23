@@ -1,5 +1,9 @@
-use std::time::Instant;
+use std::{
+    io::{Cursor, Read},
+    time::Instant,
+};
 
+use regex::Regex;
 use sha2::{Digest, Sha256};
 use tauri::AppHandle;
 use thiserror::Error;
@@ -11,8 +15,8 @@ use crate::{
     local_state, logging,
     mail::{self, parser::parse_message},
     models::{
-        AppConfig, ExtractedValue, FetchedMessage, ParsedMessage, ProcessingResult,
-        ProcessingStatus, StudentIdentity,
+        AppConfig, Attachment, ExtractedValue, FetchedMessage, MailConfig, ParsedMessage,
+        ProcessingResult, ProcessingStatus, StudentIdentity,
     },
 };
 
@@ -73,7 +77,10 @@ pub async fn process_once(
     logging::write(
         app,
         "INFO",
-        format!("stage=mailbox_scan mailbox=\"{}\" started", mail_config.mailbox),
+        format!(
+            "stage=mailbox_scan mailbox=\"{}\" started",
+            mail_config.mailbox
+        ),
     );
     let listing = mail::list_message_uids(mail_config, &password)
         .await
@@ -110,7 +117,10 @@ pub async fn process_once(
         logging::write(
             app,
             "INFO",
-            format!("stage=process_once completed candidate_messages=0 elapsed_ms={}", run_started.elapsed().as_millis()),
+            format!(
+                "stage=process_once completed candidate_messages=0 elapsed_ms={}",
+                run_started.elapsed().as_millis()
+            ),
         );
         return Ok(Vec::new());
     }
@@ -160,7 +170,9 @@ pub async fn process_once(
                     ),
                 );
                 if message.attachments.is_empty() {
-                    results.push(no_attachment_result(fetched.uid, message));
+                    let result = no_attachment_result(fetched.uid, message);
+                    checkpoint_result(app, mail_config, listing.uid_validity, &result)?;
+                    results.push(result);
                 } else {
                     parsed.push((fetched, message));
                 }
@@ -176,14 +188,16 @@ pub async fn process_once(
                         error
                     ),
                 );
-                results.push(review_result(
+                let result = review_result(
                     fetched.uid,
                     None,
                     None,
                     None,
                     0,
                     format!("Could not parse message: {error}"),
-                ));
+                );
+                checkpoint_result(app, mail_config, listing.uid_validity, &result)?;
+                results.push(result);
             }
         }
     }
@@ -197,7 +211,10 @@ pub async fn process_once(
         logging::write(
             app,
             "INFO",
-            format!("stage=drive_connect completed elapsed_ms={}", drive_auth_started.elapsed().as_millis()),
+            format!(
+                "stage=drive_connect completed elapsed_ms={}",
+                drive_auth_started.elapsed().as_millis()
+            ),
         );
 
         let folder_started = Instant::now();
@@ -219,35 +236,92 @@ pub async fn process_once(
                 folder_started.elapsed().as_millis()
             ),
         );
+
+        if folders.is_empty() {
+            logging::write(
+                app,
+                "ERROR",
+                format!(
+                    "stage=drive_folder_list root_id=\"{root_id}\" invalid_student_root=true reason=no_child_folders"
+                ),
+            );
+            return Err(WorkflowError::Drive(
+                "configured student root contains no child folders; choose the folder that directly contains the student folders"
+                    .into(),
+            ));
+        }
+
         for (fetched, message) in parsed {
-            results.push(process_parsed_message(app, &drive, &folders, fetched, message).await);
+            let result = process_parsed_message(app, &drive, &folders, fetched, message).await;
+            checkpoint_result(app, mail_config, listing.uid_validity, &result)?;
+            results.push(result);
         }
     }
 
     results.sort_by_key(|result| result.uid);
-    for result in &results {
-        if !matches!(result.status, ProcessingStatus::Failed) {
-            local_state::mark_terminal(
-                app,
-                mail_config,
-                listing.uid_validity,
-                result.uid,
-                &result.status,
-            )
-            .map_err(WorkflowError::LocalState)?;
-        }
-    }
     logging::write(
         app,
         "INFO",
         format!(
             "stage=process_once completed results={} failed={} elapsed_ms={}",
             results.len(),
-            results.iter().filter(|result| matches!(result.status, ProcessingStatus::Failed)).count(),
+            results
+                .iter()
+                .filter(|result| matches!(result.status, ProcessingStatus::Failed))
+                .count(),
             run_started.elapsed().as_millis()
         ),
     );
     Ok(results)
+}
+
+fn checkpoint_result(
+    app: &AppHandle,
+    mail_config: &MailConfig,
+    uid_validity: u32,
+    result: &ProcessingResult,
+) -> Result<(), WorkflowError> {
+    if matches!(result.status, ProcessingStatus::Failed) {
+        logging::write(
+            app,
+            "INFO",
+            format!(
+                "stage=local_state uid={} status={} saved=false retryable=true",
+                result.uid,
+                status_name(&result.status)
+            ),
+        );
+        return Ok(());
+    }
+
+    local_state::mark_terminal(
+        app,
+        mail_config,
+        uid_validity,
+        result.uid,
+        &result.status,
+    )
+    .map_err(WorkflowError::LocalState)?;
+    let entries = local_state::entry_count(app).map_err(WorkflowError::LocalState)?;
+    logging::write(
+        app,
+        "INFO",
+        format!(
+            "stage=local_state uid={} status={} saved=true entries={entries}",
+            result.uid,
+            status_name(&result.status)
+        ),
+    );
+    Ok(())
+}
+
+fn status_name(status: &ProcessingStatus) -> &'static str {
+    match status {
+        ProcessingStatus::Uploaded => "uploaded",
+        ProcessingStatus::ProcessedNoAttachments => "processed_no_attachments",
+        ProcessingStatus::NeedsReview => "needs_review",
+        ProcessingStatus::Failed => "failed",
+    }
 }
 
 fn fetch_failure_result(uid: u32, error: String) -> ProcessingResult {
@@ -299,14 +373,33 @@ async fn process_parsed_message(
     let student_name = preferred_student_name(&identity).map(|value| value.value.clone());
     let attachment_count = message.attachments.len();
 
+    log_attachment_text_diagnostics(app, fetched.uid, &message.attachments);
     logging::write(
         app,
         "INFO",
         format!(
-            "stage=student_match uid={} started attachments={} student=\"{}\"",
+            "stage=identity_extract uid={} attachments={} chinese_name_found={} english_name_found={} application_id_found={} preferred_name=\"{}\" evidence=\"{}\"",
             fetched.uid,
             attachment_count,
-            student_name.as_deref().unwrap_or("unknown")
+            identity.chinese_name.is_some(),
+            identity.english_name.is_some(),
+            identity.application_id.is_some(),
+            student_name.as_deref().unwrap_or("unknown"),
+            preferred_student_name(&identity)
+                .map(|value| value.evidence.as_str())
+                .unwrap_or("none")
+        ),
+    );
+
+    logging::write(
+        app,
+        "INFO",
+        format!(
+            "stage=student_match uid={} started attachments={} student=\"{}\" available_folders={}",
+            fetched.uid,
+            attachment_count,
+            student_name.as_deref().unwrap_or("unknown"),
+            folders.len()
         ),
     );
     let folder = match match_student_folder(folders, &identity) {
@@ -314,7 +407,10 @@ async fn process_parsed_message(
             logging::write(
                 app,
                 "INFO",
-                format!("stage=student_match uid={} matched folder=\"{}\" folder_id=\"{}\"", fetched.uid, folder.name, folder.id),
+                format!(
+                    "stage=student_match uid={} matched folder=\"{}\" folder_id=\"{}\"",
+                    fetched.uid, folder.name, folder.id
+                ),
             );
             folder
         }
@@ -322,7 +418,11 @@ async fn process_parsed_message(
             logging::write(
                 app,
                 "WARN",
-                format!("stage=student_match uid={} ambiguous candidates={}", fetched.uid, candidates.len()),
+                format!(
+                    "stage=student_match uid={} ambiguous candidates={}",
+                    fetched.uid,
+                    candidates.len()
+                ),
             );
             return review_result(
                 fetched.uid,
@@ -342,7 +442,16 @@ async fn process_parsed_message(
             );
         }
         FolderMatch::NotFound => {
-            logging::write(app, "WARN", format!("stage=student_match uid={} not_found", fetched.uid));
+            logging::write(
+                app,
+                "WARN",
+                format!(
+                    "stage=student_match uid={} not_found identity_present={} available_folders={}",
+                    fetched.uid,
+                    student_name.is_some(),
+                    folders.len()
+                ),
+            );
             return review_result(
                 fetched.uid,
                 message.message_id.clone(),
@@ -379,7 +488,12 @@ async fn process_parsed_message(
                 logging::write(
                     app,
                     "INFO",
-                    format!("stage=attachment uid={} filename=\"{}\" skipped_existing=true elapsed_ms={}", fetched.uid, attachment.filename, attachment_started.elapsed().as_millis()),
+                    format!(
+                        "stage=attachment uid={} filename=\"{}\" skipped_existing=true elapsed_ms={}",
+                        fetched.uid,
+                        attachment.filename,
+                        attachment_started.elapsed().as_millis()
+                    ),
                 );
                 continue;
             }
@@ -388,7 +502,13 @@ async fn process_parsed_message(
                 logging::write(
                     app,
                     "ERROR",
-                    format!("stage=attachment uid={} filename=\"{}\" idempotency_check_failed elapsed_ms={} error=\"{}\"", fetched.uid, attachment.filename, attachment_started.elapsed().as_millis(), error),
+                    format!(
+                        "stage=attachment uid={} filename=\"{}\" idempotency_check_failed elapsed_ms={} error=\"{}\"",
+                        fetched.uid,
+                        attachment.filename,
+                        attachment_started.elapsed().as_millis(),
+                        error
+                    ),
                 );
                 return failed_result(
                     fetched.uid,
@@ -412,14 +532,25 @@ async fn process_parsed_message(
                 logging::write(
                     app,
                     "INFO",
-                    format!("stage=attachment uid={} filename=\"{}\" uploaded=true elapsed_ms={}", fetched.uid, attachment.filename, attachment_started.elapsed().as_millis()),
+                    format!(
+                        "stage=attachment uid={} filename=\"{}\" uploaded=true elapsed_ms={}",
+                        fetched.uid,
+                        attachment.filename,
+                        attachment_started.elapsed().as_millis()
+                    ),
                 );
             }
             Err(error) => {
                 logging::write(
                     app,
                     "ERROR",
-                    format!("stage=attachment uid={} filename=\"{}\" upload_failed elapsed_ms={} error=\"{}\"", fetched.uid, attachment.filename, attachment_started.elapsed().as_millis(), error),
+                    format!(
+                        "stage=attachment uid={} filename=\"{}\" upload_failed elapsed_ms={} error=\"{}\"",
+                        fetched.uid,
+                        attachment.filename,
+                        attachment_started.elapsed().as_millis(),
+                        error
+                    ),
                 );
                 return failed_result(
                     fetched.uid,
@@ -440,7 +571,12 @@ async fn process_parsed_message(
     logging::write(
         app,
         "INFO",
-        format!("stage=message_processing uid={} completed attachments={} elapsed_ms={}", fetched.uid, attachment_count, message_started.elapsed().as_millis()),
+        format!(
+            "stage=message_processing uid={} completed attachments={} elapsed_ms={}",
+            fetched.uid,
+            attachment_count,
+            message_started.elapsed().as_millis()
+        ),
     );
     ProcessingResult {
         uid: fetched.uid,
@@ -456,6 +592,124 @@ async fn process_parsed_message(
         status: ProcessingStatus::Uploaded,
         detail: "Processing completed; source email left unchanged".into(),
     }
+}
+
+fn log_attachment_text_diagnostics(app: &AppHandle, uid: u32, attachments: &[Attachment]) {
+    for (index, attachment) in attachments.iter().enumerate() {
+        let diagnostic = attachment_text_diagnostic(attachment);
+        logging::write(
+            app,
+            "INFO",
+            format!(
+                "stage=attachment_text_extract uid={} sequence={}/{} filename=\"{}\" content_type=\"{}\" bytes={} kind={} extractable={} extracted={} text_chars={} reason=\"{}\"",
+                uid,
+                index + 1,
+                attachments.len(),
+                attachment.filename,
+                attachment.content_type,
+                attachment.bytes.len(),
+                diagnostic.kind,
+                diagnostic.extractable,
+                diagnostic.extracted,
+                diagnostic.text_chars,
+                diagnostic.reason
+            ),
+        );
+    }
+}
+
+struct AttachmentTextDiagnostic {
+    kind: &'static str,
+    extractable: bool,
+    extracted: bool,
+    text_chars: usize,
+    reason: &'static str,
+}
+
+fn attachment_text_diagnostic(attachment: &Attachment) -> AttachmentTextDiagnostic {
+    const MAX_TEXT_BYTES: usize = 2_000_000;
+    let content_type = attachment.content_type.to_ascii_lowercase();
+    let filename = attachment.filename.to_ascii_lowercase();
+
+    if content_type.starts_with("text/")
+        || filename.ends_with(".txt")
+        || filename.ends_with(".csv")
+        || filename.ends_with(".json")
+        || filename.ends_with(".xml")
+        || filename.ends_with(".html")
+        || filename.ends_with(".htm")
+    {
+        let bytes = &attachment.bytes[..attachment.bytes.len().min(MAX_TEXT_BYTES)];
+        let text = String::from_utf8_lossy(bytes);
+        let text_chars = text.trim().chars().count();
+        return AttachmentTextDiagnostic {
+            kind: "text",
+            extractable: true,
+            extracted: text_chars > 0,
+            text_chars,
+            reason: if text_chars > 0 { "ok" } else { "empty_text" },
+        };
+    }
+
+    if content_type == "application/pdf" || filename.ends_with(".pdf") {
+        return match pdf_extract::extract_text_from_mem(&attachment.bytes) {
+            Ok(text) if !text.trim().is_empty() => AttachmentTextDiagnostic {
+                kind: "pdf",
+                extractable: true,
+                extracted: true,
+                text_chars: text.trim().chars().count(),
+                reason: "ok",
+            },
+            _ => AttachmentTextDiagnostic {
+                kind: "pdf",
+                extractable: true,
+                extracted: false,
+                text_chars: 0,
+                reason: "no_text_layer_or_parse_failed",
+            },
+        };
+    }
+
+    if content_type
+        == "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+        || filename.ends_with(".docx")
+    {
+        return match diagnostic_docx_text_chars(&attachment.bytes) {
+            Some(text_chars) if text_chars > 0 => AttachmentTextDiagnostic {
+                kind: "docx",
+                extractable: true,
+                extracted: true,
+                text_chars,
+                reason: "ok",
+            },
+            _ => AttachmentTextDiagnostic {
+                kind: "docx",
+                extractable: true,
+                extracted: false,
+                text_chars: 0,
+                reason: "document_xml_unavailable_or_empty",
+            },
+        };
+    }
+
+    AttachmentTextDiagnostic {
+        kind: "unsupported",
+        extractable: false,
+        extracted: false,
+        text_chars: 0,
+        reason: "unsupported_format",
+    }
+}
+
+fn diagnostic_docx_text_chars(bytes: &[u8]) -> Option<usize> {
+    let cursor = Cursor::new(bytes);
+    let mut archive = zip::ZipArchive::new(cursor).ok()?;
+    let mut document = archive.by_name("word/document.xml").ok()?;
+    let mut xml = String::new();
+    document.read_to_string(&mut xml).ok()?;
+    let tag_re = Regex::new(r"(?is)<[^>]+>").expect("constant XML diagnostic regex");
+    let text = tag_re.replace_all(&xml, "");
+    Some(text.trim().chars().count())
 }
 
 fn review_result(
@@ -689,5 +943,17 @@ mod tests {
             attachment_key(&digest, b"offer.pdf", b"payload"),
             attachment_key(&digest, b"offer.pdf", b"new payload")
         );
+    }
+
+    #[test]
+    fn unsupported_attachment_is_reported_as_non_extractable() {
+        let diagnostic = attachment_text_diagnostic(&Attachment {
+            filename: "photo.jpg".into(),
+            content_type: "image/jpeg".into(),
+            bytes: vec![1, 2, 3],
+        });
+        assert!(!diagnostic.extractable);
+        assert!(!diagnostic.extracted);
+        assert_eq!(diagnostic.reason, "unsupported_format");
     }
 }
