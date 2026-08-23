@@ -122,7 +122,7 @@ fn get_log_path(app: AppHandle) -> Result<String, String> {
 
 #[tauri::command]
 fn get_processing_state_path(app: AppHandle) -> Result<String, String> {
-    local_state::state_path(&app).map(|path| path.display().to_string())
+    local_state::ensure_exists(&app).map(|path| path.display().to_string())
 }
 
 #[tauri::command]
@@ -272,13 +272,30 @@ pub fn run() {
                 MacosLauncher::LaunchAgent,
                 None,
             ))?;
-            let state_path = local_state::state_path(app.handle())
-                .map(|path| path.display().to_string())
-                .unwrap_or_else(|_| "unavailable".into());
+
+            let (state_path, state_exists, state_entries) = match local_state::ensure_exists(app.handle()) {
+                Ok(path) => {
+                    let entries = local_state::entry_count(app.handle()).unwrap_or_default();
+                    (path.display().to_string(), true, entries)
+                }
+                Err(error) => {
+                    logging::write(
+                        app.handle(),
+                        "ERROR",
+                        format!("stage=local_state initialize_failed error=\"{error}\""),
+                    );
+                    ("unavailable".into(), false, 0)
+                }
+            };
+
             logging::write(
                 app.handle(),
                 "INFO",
-                format!("Email Triage started processing_state=idle mail_access=read_only local_state=\"{state_path}\" message_fetch_timeout_seconds={} processing_watchdog_seconds={}", mail::MESSAGE_FETCH_TIMEOUT.as_secs(), scheduler::PROCESSING_TIMEOUT.as_secs()),
+                format!(
+                    "Email Triage started processing_state=idle mail_access=read_only local_state=\"{state_path}\" local_state_exists={state_exists} local_state_entries={state_entries} message_fetch_timeout_seconds={} processing_watchdog_seconds={}",
+                    mail::MESSAGE_FETCH_TIMEOUT.as_secs(),
+                    scheduler::PROCESSING_TIMEOUT.as_secs()
+                ),
             );
             setup_tray(app)?;
             scheduler::start(app.handle().clone());
