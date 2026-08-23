@@ -141,6 +141,7 @@ async fn process_now(
     gate: State<'_, ProcessingGate>,
 ) -> Result<Vec<ProcessingResult>, String> {
     let version = env!("CARGO_PKG_VERSION");
+    let pid = std::process::id();
     let gate = gate.inner().clone();
     let Some(_lease) = scheduler::try_enter(&gate, "manual") else {
         let source = scheduler::current_source(&gate).unwrap_or_else(|| "unknown".into());
@@ -153,7 +154,7 @@ async fn process_now(
             logging::write(
                 &app,
                 "ERROR",
-                format!("version={version} source=manual stage=configuration_load action=\"Loading saved configuration before manual mailbox check\" failed=true error=\"{error}\""),
+                format!("version={version} pid={pid} source=manual stage=configuration_load action=\"Loading saved configuration before manual mailbox check\" failed=true error=\"{error}\""),
             );
             return Err(error.to_string());
         }
@@ -168,7 +169,7 @@ async fn process_now(
         &app,
         "INFO",
         format!(
-            "version={version} source=manual mailbox_check mailbox=\"{mailbox}\" started watchdog_seconds={} action=\"Checking Tencent mailbox, fetching candidate messages, extracting student identity, and filing attachments to Drive\"",
+            "version={version} pid={pid} source=manual mailbox_check mailbox=\"{mailbox}\" started watchdog_seconds={} action=\"Checking Tencent mailbox, fetching candidate messages, extracting student identity, and filing attachments to Drive\"",
             scheduler::PROCESSING_TIMEOUT.as_secs()
         ),
     );
@@ -185,7 +186,7 @@ async fn process_now(
                 &app,
                 "INFO",
                 format!(
-                    "version={version} source=manual mailbox_check mailbox=\"{mailbox}\" completed elapsed_ms={} action=\"Manual mailbox check finished\"",
+                    "version={version} pid={pid} source=manual mailbox_check mailbox=\"{mailbox}\" completed elapsed_ms={} action=\"Manual mailbox check finished\"",
                     started.elapsed().as_millis()
                 ),
             );
@@ -196,7 +197,7 @@ async fn process_now(
                 &app,
                 "ERROR",
                 format!(
-                    "version={version} source=manual mailbox_check mailbox=\"{mailbox}\" failed elapsed_ms={} action=\"Manual mailbox check stopped with an error\" error=\"{error}\"",
+                    "version={version} pid={pid} source=manual mailbox_check mailbox=\"{mailbox}\" failed elapsed_ms={} action=\"Manual mailbox check stopped with an error\" error=\"{error}\"",
                     started.elapsed().as_millis()
                 ),
             );
@@ -207,7 +208,7 @@ async fn process_now(
                 &app,
                 "ERROR",
                 format!(
-                    "version={version} source=manual mailbox_check mailbox=\"{mailbox}\" timed_out seconds={} elapsed_ms={} action=\"Manual mailbox check exceeded its overall watchdog timeout\"",
+                    "version={version} pid={pid} source=manual mailbox_check mailbox=\"{mailbox}\" timed_out seconds={} elapsed_ms={} action=\"Manual mailbox check exceeded its overall watchdog timeout\"",
                     scheduler::PROCESSING_TIMEOUT.as_secs(),
                     started.elapsed().as_millis()
                 ),
@@ -279,15 +280,62 @@ fn setup_tray(app: &tauri::App) -> tauri::Result<()> {
     Ok(())
 }
 
+fn panic_payload(info: &std::panic::PanicHookInfo<'_>) -> String {
+    if let Some(message) = info.payload().downcast_ref::<&str>() {
+        (*message).replace('"', "'")
+    } else if let Some(message) = info.payload().downcast_ref::<String>() {
+        message.replace('"', "'")
+    } else {
+        "non-string panic payload".into()
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        .plugin(tauri_plugin_single_instance::init(|app, args, cwd| {
+            let version = env!("CARGO_PKG_VERSION");
+            let pid = std::process::id();
+            logging::write(
+                app,
+                "WARN",
+                format!(
+                    "version={version} pid={pid} stage=single_instance second_launch_blocked=true args_count={} cwd=\"{}\" action=\"A second Email Triage launch was prevented; focusing the already-running instance\"",
+                    args.len(),
+                    cwd.replace('"', "'")
+                ),
+            );
+            show_main_window(app);
+        }))
         .manage(scheduler::new_gate())
         .setup(|app| {
             app.handle().plugin(tauri_plugin_autostart::init(
                 MacosLauncher::LaunchAgent,
                 None,
             ))?;
+
+            let panic_app = app.handle().clone();
+            std::panic::set_hook(Box::new(move |info| {
+                let version = env!("CARGO_PKG_VERSION");
+                let pid = std::process::id();
+                let thread = std::thread::current()
+                    .name()
+                    .unwrap_or("unnamed")
+                    .replace('"', "'");
+                let location = info
+                    .location()
+                    .map(|location| format!("{}:{}:{}", location.file(), location.line(), location.column()))
+                    .unwrap_or_else(|| "unknown".into())
+                    .replace('"', "'");
+                logging::write(
+                    &panic_app,
+                    "ERROR",
+                    format!(
+                        "version={version} pid={pid} stage=panic thread=\"{thread}\" location=\"{location}\" message=\"{}\" action=\"A Rust panic occurred; inspect the immediately preceding stage/UID logs\"",
+                        panic_payload(info)
+                    ),
+                );
+            }));
 
             let (state_path, state_exists, state_entries) =
                 match local_state::ensure_exists(app.handle()) {
@@ -299,18 +347,23 @@ pub fn run() {
                         logging::write(
                             app.handle(),
                             "ERROR",
-                            format!("version={} stage=local_state action=\"Initializing local processing state\" initialize_failed=true error=\"{error}\"", env!("CARGO_PKG_VERSION")),
+                            format!("version={} pid={} stage=local_state action=\"Initializing local processing state\" initialize_failed=true error=\"{error}\"", env!("CARGO_PKG_VERSION"), std::process::id()),
                         );
                         ("unavailable".into(), false, 0)
                     }
                 };
 
+            let executable = std::env::current_exe()
+                .map(|path| path.display().to_string())
+                .unwrap_or_else(|_| "unknown".into())
+                .replace('"', "'");
             logging::write(
                 app.handle(),
                 "INFO",
                 format!(
-                    "Email Triage started version={} action=\"Application startup complete; background scheduler is active\" processing_state=idle mail_access=read_only local_state=\"{state_path}\" local_state_exists={state_exists} local_state_entries={state_entries} message_fetch_timeout_seconds={} processing_watchdog_seconds={}",
+                    "Email Triage started version={} pid={} executable=\"{executable}\" single_instance=true action=\"Application startup complete; background scheduler is active\" processing_state=idle mail_access=read_only local_state=\"{state_path}\" local_state_exists={state_exists} local_state_entries={state_entries} message_fetch_timeout_seconds={} processing_watchdog_seconds={}",
                     env!("CARGO_PKG_VERSION"),
+                    std::process::id(),
                     mail::MESSAGE_FETCH_TIMEOUT.as_secs(),
                     scheduler::PROCESSING_TIMEOUT.as_secs()
                 ),
