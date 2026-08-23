@@ -25,6 +25,7 @@ const DRIVE_SCOPE: &str = "https://www.googleapis.com/auth/drive";
 const DRIVE_API: &str = "https://www.googleapis.com/drive/v3";
 const DRIVE_UPLOAD_API: &str = "https://www.googleapis.com/upload/drive/v3";
 const TRIAGE_PROPERTY: &str = "emailTriageKey";
+const FOLDER_MIME_TYPE: &str = "application/vnd.google-apps.folder";
 
 #[derive(Debug, Error)]
 pub enum GoogleDriveError {
@@ -285,9 +286,38 @@ impl DriveClient {
     pub async fn list_folders(&self, parent_id: &str) -> Result<Vec<DriveFile>, GoogleDriveError> {
         let parent = escape_query(parent_id);
         let query = format!(
-            "'{parent}' in parents and mimeType='application/vnd.google-apps.folder' and trashed=false"
+            "'{parent}' in parents and mimeType='{FOLDER_MIME_TYPE}' and trashed=false"
         );
         self.list_query(&query).await
+    }
+
+    pub async fn create_folder(
+        &self,
+        parent_id: &str,
+        name: &str,
+    ) -> Result<DriveFile, GoogleDriveError> {
+        let metadata = serde_json::json!({
+            "name": name,
+            "mimeType": FOLDER_MIME_TYPE,
+            "parents": [parent_id]
+        });
+        let response = self
+            .http
+            .post(format!("{DRIVE_API}/files"))
+            .bearer_auth(&self.access_token)
+            .query(&[
+                ("supportsAllDrives", "true"),
+                ("fields", "id,name,mimeType,parents"),
+            ])
+            .json(&metadata)
+            .send()
+            .await
+            .map_err(|e| GoogleDriveError::Api(e.to_string()))?;
+        let response = ensure_success(response).await?;
+        response
+            .json::<DriveFile>()
+            .await
+            .map_err(|e| GoogleDriveError::Api(e.to_string()))
     }
 
     pub async fn find_by_triage_key(
