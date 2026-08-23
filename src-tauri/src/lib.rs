@@ -26,6 +26,11 @@ use models::{AppConfig, MailConfig, ParsedMessage, ProcessingResult, StudentIden
 use scheduler::ProcessingGate;
 
 #[tauri::command]
+fn get_app_version() -> String {
+    env!("CARGO_PKG_VERSION").to_string()
+}
+
+#[tauri::command]
 fn get_config(app: AppHandle) -> Result<AppConfig, String> {
     config::load(&app).map_err(|e| e.to_string())
 }
@@ -135,6 +140,7 @@ async fn process_now(
     app: AppHandle,
     gate: State<'_, ProcessingGate>,
 ) -> Result<Vec<ProcessingResult>, String> {
+    let version = env!("CARGO_PKG_VERSION");
     let gate = gate.inner().clone();
     let Some(_lease) = scheduler::try_enter(&gate, "manual") else {
         let source = scheduler::current_source(&gate).unwrap_or_else(|| "unknown".into());
@@ -147,7 +153,7 @@ async fn process_now(
             logging::write(
                 &app,
                 "ERROR",
-                format!("source=manual configuration_load failed error=\"{error}\""),
+                format!("version={version} source=manual stage=configuration_load action=\"Loading saved configuration before manual mailbox check\" failed=true error=\"{error}\""),
             );
             return Err(error.to_string());
         }
@@ -162,7 +168,7 @@ async fn process_now(
         &app,
         "INFO",
         format!(
-            "source=manual mailbox_check mailbox=\"{mailbox}\" started watchdog_seconds={}",
+            "version={version} source=manual mailbox_check mailbox=\"{mailbox}\" started watchdog_seconds={} action=\"Checking Tencent mailbox, fetching candidate messages, extracting student identity, and filing attachments to Drive\"",
             scheduler::PROCESSING_TIMEOUT.as_secs()
         ),
     );
@@ -179,7 +185,7 @@ async fn process_now(
                 &app,
                 "INFO",
                 format!(
-                    "source=manual mailbox_check mailbox=\"{mailbox}\" completed elapsed_ms={}",
+                    "version={version} source=manual mailbox_check mailbox=\"{mailbox}\" completed elapsed_ms={} action=\"Manual mailbox check finished\"",
                     started.elapsed().as_millis()
                 ),
             );
@@ -190,7 +196,7 @@ async fn process_now(
                 &app,
                 "ERROR",
                 format!(
-                    "source=manual mailbox_check mailbox=\"{mailbox}\" failed elapsed_ms={} error=\"{error}\"",
+                    "version={version} source=manual mailbox_check mailbox=\"{mailbox}\" failed elapsed_ms={} action=\"Manual mailbox check stopped with an error\" error=\"{error}\"",
                     started.elapsed().as_millis()
                 ),
             );
@@ -201,7 +207,7 @@ async fn process_now(
                 &app,
                 "ERROR",
                 format!(
-                    "source=manual mailbox_check mailbox=\"{mailbox}\" timed_out seconds={} elapsed_ms={}",
+                    "version={version} source=manual mailbox_check mailbox=\"{mailbox}\" timed_out seconds={} elapsed_ms={} action=\"Manual mailbox check exceeded its overall watchdog timeout\"",
                     scheduler::PROCESSING_TIMEOUT.as_secs(),
                     started.elapsed().as_millis()
                 ),
@@ -293,7 +299,7 @@ pub fn run() {
                         logging::write(
                             app.handle(),
                             "ERROR",
-                            format!("stage=local_state initialize_failed error=\"{error}\""),
+                            format!("version={} stage=local_state action=\"Initializing local processing state\" initialize_failed=true error=\"{error}\"", env!("CARGO_PKG_VERSION")),
                         );
                         ("unavailable".into(), false, 0)
                     }
@@ -303,7 +309,7 @@ pub fn run() {
                 app.handle(),
                 "INFO",
                 format!(
-                    "Email Triage started version={} processing_state=idle mail_access=read_only local_state=\"{state_path}\" local_state_exists={state_exists} local_state_entries={state_entries} message_fetch_timeout_seconds={} processing_watchdog_seconds={}",
+                    "Email Triage started version={} action=\"Application startup complete; background scheduler is active\" processing_state=idle mail_access=read_only local_state=\"{state_path}\" local_state_exists={state_exists} local_state_entries={state_entries} message_fetch_timeout_seconds={} processing_watchdog_seconds={}",
                     env!("CARGO_PKG_VERSION"),
                     mail::MESSAGE_FETCH_TIMEOUT.as_secs(),
                     scheduler::PROCESSING_TIMEOUT.as_secs()
@@ -320,6 +326,7 @@ pub fn run() {
             }
         })
         .invoke_handler(tauri::generate_handler![
+            get_app_version,
             get_config,
             save_config,
             save_mail_account,

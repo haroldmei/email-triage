@@ -59,6 +59,7 @@ pub fn current_source(gate: &ProcessingGate) -> Option<String> {
 
 pub fn start(app: AppHandle) {
     tauri::async_runtime::spawn(async move {
+        let version = env!("CARGO_PKG_VERSION");
         loop {
             let wait = config::load(&app)
                 .map(|cfg| cfg.poll_interval_seconds.max(30))
@@ -66,11 +67,19 @@ pub fn start(app: AppHandle) {
             tokio::time::sleep(Duration::from_secs(wait)).await;
 
             let Ok(cfg) = config::load(&app) else {
-                logging::write(&app, "ERROR", "source=background configuration_load failed");
+                logging::write(
+                    &app,
+                    "ERROR",
+                    format!("version={version} source=background stage=configuration_load action=\"Loading saved configuration before scheduled mailbox check\" failed=true"),
+                );
                 continue;
             };
             if !is_ready(&cfg) {
-                logging::write(&app, "INFO", "source=background mailbox_check skipped reason=setup_incomplete");
+                logging::write(
+                    &app,
+                    "INFO",
+                    format!("version={version} source=background mailbox_check skipped reason=setup_incomplete action=\"Scheduled check skipped because mailbox, Google account, or Drive root is not fully configured\""),
+                );
                 continue;
             }
 
@@ -80,7 +89,7 @@ pub fn start(app: AppHandle) {
                 logging::write(
                     &app,
                     "INFO",
-                    format!("source=background mailbox_check skipped reason=processing_already_running active_source={active_source}"),
+                    format!("version={version} source=background mailbox_check skipped reason=processing_already_running active_source={active_source} action=\"Scheduled check skipped because another processing run is still active\""),
                 );
                 continue;
             };
@@ -95,7 +104,7 @@ pub fn start(app: AppHandle) {
                 &app,
                 "INFO",
                 format!(
-                    "source=background mailbox_check mailbox=\"{mailbox}\" started poll_interval_seconds={} watchdog_seconds={}",
+                    "version={version} source=background mailbox_check mailbox=\"{mailbox}\" started poll_interval_seconds={} watchdog_seconds={} action=\"Checking Tencent mailbox, fetching candidate messages, extracting student identity, and filing attachments to Drive\"",
                     cfg.poll_interval_seconds,
                     PROCESSING_TIMEOUT.as_secs()
                 ),
@@ -106,18 +115,18 @@ pub fn start(app: AppHandle) {
                     logging::write(
                         &app,
                         "INFO",
-                        format!("source=background mailbox_check mailbox=\"{mailbox}\" completed elapsed_ms={}", started.elapsed().as_millis()),
+                        format!("version={version} source=background mailbox_check mailbox=\"{mailbox}\" completed elapsed_ms={} action=\"Scheduled mailbox check finished\"", started.elapsed().as_millis()),
                     );
                 }
                 Ok(Err(error)) => logging::write(
                     &app,
                     "ERROR",
-                    format!("source=background mailbox_check mailbox=\"{mailbox}\" failed elapsed_ms={} error=\"{error}\"", started.elapsed().as_millis()),
+                    format!("version={version} source=background mailbox_check mailbox=\"{mailbox}\" failed elapsed_ms={} action=\"Scheduled mailbox check stopped with an error\" error=\"{error}\"", started.elapsed().as_millis()),
                 ),
                 Err(_) => logging::write(
                     &app,
                     "ERROR",
-                    format!("source=background mailbox_check mailbox=\"{mailbox}\" timed_out seconds={} elapsed_ms={}", PROCESSING_TIMEOUT.as_secs(), started.elapsed().as_millis()),
+                    format!("version={version} source=background mailbox_check mailbox=\"{mailbox}\" timed_out seconds={} elapsed_ms={} action=\"Scheduled mailbox check exceeded its overall watchdog timeout\"", PROCESSING_TIMEOUT.as_secs(), started.elapsed().as_millis()),
                 ),
             }
         }

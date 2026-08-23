@@ -69,16 +69,22 @@ export default function App() {
   const [logLines, setLogLines] = useState<string[]>([]);
   const [logPath, setLogPath] = useState('');
   const [processingStatePath, setProcessingStatePath] = useState('');
+  const [appVersion, setAppVersion] = useState('unknown');
   const [autostart, setAutostartState] = useState(false);
   const [busy, setBusy] = useState<string | null>(null);
   const [notice, setNotice] = useState<string>('');
   const [error, setError] = useState<string>('');
 
   useEffect(() => {
-    Promise.all([invoke<AppConfig>('get_config'), invoke<boolean>('get_autostart')])
-      .then(([saved, autostartEnabled]) => {
+    Promise.all([
+      invoke<AppConfig>('get_config'),
+      invoke<boolean>('get_autostart'),
+      invoke<string>('get_app_version'),
+    ])
+      .then(([saved, autostartEnabled, version]) => {
         setConfig(saved);
         setAutostartState(autostartEnabled);
+        setAppVersion(version);
         if (saved.mail) setMail(saved.mail);
       })
       .catch((err) => setError(String(err)));
@@ -234,7 +240,7 @@ export default function App() {
     <main className="shell">
       <section className="hero">
         <div>
-          <p className="eyebrow">Email Triage</p>
+          <p className="eyebrow">Email Triage · v{appVersion}</p>
           <h1>Route student attachments from email to Google Drive.</h1>
           <p className="lede">
             Local-first automation with read-only mailbox access. Email Triage never moves,
@@ -451,12 +457,13 @@ export default function App() {
       <section className="panel logPanel">
         <div className="panelHeader">
           <div>
-            <p className="eyebrow">Live activity</p>
+            <p className="eyebrow">Live activity · running v{appVersion}</p>
             <h2>Processing log</h2>
           </div>
           <button type="button" onClick={refreshLogs}>Refresh</button>
         </div>
         <div className="logMeta">
+          <span>Running version: {appVersion}</span>
           <span>UI refreshes every 2 seconds. Mailbox checks run every {config.pollIntervalSeconds} seconds.</span>
           {logPath && <span title={logPath}>Log file: {logPath}</span>}
           {processingStatePath && (
