@@ -240,11 +240,7 @@ fn filename_name_candidates(filename: &str) -> Vec<String> {
         }
     }
 
-    let normalized = stem
-        .replace('_', " ")
-        .replace('-', " ")
-        .replace('—', " ")
-        .replace('–', " ");
+    let normalized = stem.replace(['_', '-', '—', '–'], " ");
     let tokens = normalized
         .split_whitespace()
         .map(|token| token.trim_matches(|ch: char| !ch.is_alphabetic() && ch != '\''))
