@@ -98,10 +98,18 @@ pub fn mark_terminal(
 }
 
 fn is_terminal_for_current_extractor(entry: &ProcessingEntry) -> bool {
-    if entry.status != "needs_review" {
-        return true;
+    match entry.status.as_str() {
+        // Messages without attachments are independent of identity extraction and never need
+        // to be replayed merely because the extractor changed.
+        "processed_no_attachments" => true,
+        // Both successful filing and review decisions depended on the selected identity.
+        // Revalidate them once when the extractor version changes; Drive idempotency prevents
+        // duplicate uploads when the previous folder was already correct.
+        "uploaded" | "needs_review" => {
+            entry.extractor_version.as_deref() == Some(EXTRACTOR_VERSION)
+        }
+        _ => true,
     }
-    entry.extractor_version.as_deref() == Some(EXTRACTOR_VERSION)
 }
 
 fn load(app: &AppHandle) -> Result<ProcessingLedger, String> {
@@ -165,19 +173,31 @@ mod tests {
     }
 
     #[test]
-    fn current_needs_review_remains_terminal() {
+    fn old_uploaded_entry_is_revalidated_after_extractor_upgrade() {
         let entry = ProcessingEntry {
-            status: "needs_review".into(),
+            status: "uploaded".into(),
             processed_at: "2026-01-01T00:00:00Z".into(),
-            extractor_version: Some(EXTRACTOR_VERSION.into()),
+            extractor_version: None,
         };
-        assert!(is_terminal_for_current_extractor(&entry));
+        assert!(!is_terminal_for_current_extractor(&entry));
     }
 
     #[test]
-    fn uploaded_entries_remain_terminal_across_versions() {
+    fn current_uploaded_and_review_entries_are_terminal() {
+        for status in ["uploaded", "needs_review"] {
+            let entry = ProcessingEntry {
+                status: status.into(),
+                processed_at: "2026-01-01T00:00:00Z".into(),
+                extractor_version: Some(EXTRACTOR_VERSION.into()),
+            };
+            assert!(is_terminal_for_current_extractor(&entry));
+        }
+    }
+
+    #[test]
+    fn no_attachment_entries_remain_terminal_across_versions() {
         let entry = ProcessingEntry {
-            status: "uploaded".into(),
+            status: "processed_no_attachments".into(),
             processed_at: "2026-01-01T00:00:00Z".into(),
             extractor_version: None,
         };
