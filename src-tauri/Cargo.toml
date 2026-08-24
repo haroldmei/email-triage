@@ -1,6 +1,6 @@
 [package]
 name = "email-triage"
-version = "0.1.17"
+version = "0.1.18"
 description = "Local-first email triage desktop app"
 authors = ["Email Triage contributors"]
 edition = "2021"
@@ -24,6 +24,7 @@ async-native-tls = { version = "0.6.0", default-features = false, features = ["r
 futures = "0.3"
 mailparse = "0.16.1"
 regex = "1"
+pinyin = "0.10"
 thiserror = "2"
 keyring = "4.1.6"
 oauth2 = "5.0.0"
