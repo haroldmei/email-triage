@@ -4,6 +4,7 @@ use std::{
     panic::{catch_unwind, AssertUnwindSafe},
 };
 
+use pinyin::ToPinyin;
 use regex::Regex;
 
 use crate::models::{Attachment, ExtractedValue, ParsedMessage, StudentIdentity};
@@ -23,6 +24,13 @@ struct NameCandidate {
     source_rank: u8,
 }
 
+#[derive(Default)]
+struct ResolvedNames {
+    preferred: Option<NameCandidate>,
+    english: Option<NameCandidate>,
+    chinese: Option<NameCandidate>,
+}
+
 impl IdentityExtractor for DeterministicExtractor {
     fn extract(&self, message: &ParsedMessage) -> StudentIdentity {
         let mut candidates = Vec::new();
@@ -32,21 +40,10 @@ impl IdentityExtractor for DeterministicExtractor {
         collect_filename_candidates(message, &mut candidates);
         collect_body_candidates(message, &mut candidates);
 
-        let best = choose_best_candidate(candidates);
-        let (name, english_name, chinese_name) = if let Some(candidate) = best {
-            let extracted = ExtractedValue {
-                value: candidate.value.clone(),
-                confidence: score_to_confidence(candidate.score),
-                evidence: candidate.evidence.join("; "),
-            };
-            if contains_han(&candidate.value) {
-                (Some(extracted.clone()), None, Some(extracted))
-            } else {
-                (Some(extracted.clone()), Some(extracted), None)
-            }
-        } else {
-            (None, None, None)
-        };
+        let resolved = resolve_name_candidates(candidates);
+        let name = resolved.preferred.as_ref().map(candidate_to_extracted);
+        let english_name = resolved.english.as_ref().map(candidate_to_extracted);
+        let chinese_name = resolved.chinese.as_ref().map(candidate_to_extracted);
 
         let searchable = searchable_non_name_text(message);
         StudentIdentity {
@@ -93,8 +90,18 @@ impl IdentityExtractor for DeterministicExtractor {
     }
 }
 
+fn candidate_to_extracted(candidate: &NameCandidate) -> ExtractedValue {
+    ExtractedValue {
+        value: candidate.value.clone(),
+        confidence: score_to_confidence(candidate.score),
+        evidence: candidate.evidence.join("; "),
+    }
+}
+
 fn collect_subject_candidates(message: &ParsedMessage, candidates: &mut Vec<NameCandidate>) {
-    let Some(subject) = message.subject.as_deref() else { return };
+    let Some(subject) = message.subject.as_deref() else {
+        return;
+    };
     let cleaned = Regex::new(r"(?i)^\s*(?:(?:re|fw|fwd)\s*:\s*)+")
         .expect("constant subject prefix regex")
         .replace(subject, "")
@@ -104,9 +111,10 @@ fn collect_subject_candidates(message: &ParsedMessage, candidates: &mut Vec<Name
     for pattern in [
         r"(?i)(?:student\s*name|applicant\s*name|name|学生姓名|申请人姓名|姓名)\s*[:：\-–—]\s*([\p{Han}]{2,8}|[A-Za-z][A-Za-z .'-]{2,60})",
         r"(?i)\bfor\s+([A-Za-z][A-Za-z .'-]{2,60})\s*$",
+        r"([\p{Han}]{2,4})\s*(?:的)?(?:申请|材料|offer|录取|签证|护照|成绩单)",
     ] {
         if let Some(value) = capture_raw(&cleaned, pattern) {
-            push_candidate(candidates, &value, 100, 0, "explicit email subject");
+            push_candidate(candidates, &value, 108, 0, "explicit email subject");
         }
     }
 
@@ -115,9 +123,17 @@ fn collect_subject_candidates(message: &ParsedMessage, candidates: &mut Vec<Name
             continue;
         }
         for segment in cleaned.split(delimiter) {
-            push_candidate(candidates, segment, 88, 1, "email subject segment");
+            push_candidate(candidates, segment, 98, 0, "email subject segment");
         }
     }
+
+    collect_entity_candidates_from_text(
+        &cleaned,
+        102,
+        0,
+        "person entity recognized in email subject",
+        candidates,
+    );
 }
 
 fn collect_structured_attachment_candidates(
@@ -128,11 +144,13 @@ fn collect_structured_attachment_candidates(
         let filename = attachment.filename.to_ascii_lowercase();
         let content_type = attachment.content_type.to_ascii_lowercase();
         let extracted = if filename.ends_with(".docx")
-            || content_type == "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+            || content_type
+                == "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
         {
             extract_docx_text(&attachment.bytes)
         } else if filename.ends_with(".xlsx")
-            || content_type == "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            || content_type
+                == "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
         {
             extract_xlsx_text(&attachment.bytes)
         } else if filename.ends_with(".pdf") || content_type == "application/pdf" {
@@ -141,25 +159,39 @@ fn collect_structured_attachment_candidates(
             None
         };
 
-        let Some(text) = extracted else { continue };
+        let Some(text) = extracted else {
+            continue;
+        };
         for (label, value) in labeled_name_pairs(&text) {
             let label_lower = label.to_ascii_lowercase();
             let score = if label_lower.contains("chinese")
                 || label.contains("中文")
                 || label.contains("姓名")
             {
-                98
+                104
             } else {
-                96
+                101
             };
             push_candidate(
                 candidates,
                 &value,
                 score,
                 1,
-                &format!("{} structured field in {}", label.trim(), attachment.filename),
+                &format!(
+                    "{} structured field in {}",
+                    label.trim(),
+                    attachment.filename
+                ),
             );
         }
+
+        collect_entity_candidates_from_text(
+            &text,
+            68,
+            4,
+            &format!("person entity recognized in {}", attachment.filename),
+            candidates,
+        );
     }
 }
 
@@ -178,11 +210,11 @@ fn collect_filename_candidates(message: &ParsedMessage, candidates: &mut Vec<Nam
 
     for (_, (value, count)) in counts {
         let score = if count >= 3 {
-            97
+            101
         } else if count == 2 {
-            94
+            97
         } else {
-            78
+            82
         };
         push_candidate(
             candidates,
@@ -205,10 +237,48 @@ fn collect_body_candidates(message: &ParsedMessage, candidates: &mut Vec<NameCan
         push_candidate(
             candidates,
             &value,
-            90,
+            94,
             3,
             &format!("{} in email body", label.trim()),
         );
+    }
+
+    collect_entity_candidates_from_text(
+        &body,
+        70,
+        5,
+        "person entity recognized in email body",
+        candidates,
+    );
+}
+
+fn collect_entity_candidates_from_text(
+    text: &str,
+    score: i32,
+    source_rank: u8,
+    evidence: &str,
+    candidates: &mut Vec<NameCandidate>,
+) {
+    let latin_re = Regex::new(
+        r"\b(?:[A-Z]{2,20}|[A-Z][a-z]{1,30})(?:[ _-]+(?:[A-Z]{2,20}|[A-Z][a-z]{1,30})){1,2}\b",
+    )
+    .expect("constant Latin person entity regex");
+    for entity in latin_re.find_iter(text) {
+        push_candidate(candidates, entity.as_str(), score, source_rank, evidence);
+    }
+
+    let chinese_context_patterns = [
+        r"(?:学生|申请人|同学|关于|有关)\s*([\p{Han}]{2,4})(?:的|\s|$)",
+        r"([\p{Han}]{2,4})\s*的(?:申请|材料|录取|签证|护照|成绩单|文件)",
+        r"(?:申请|材料|录取|签证|护照|成绩单|文件)\s*[-—–:：]?\s*([\p{Han}]{2,4})(?:\s|$)",
+    ];
+    for pattern in chinese_context_patterns {
+        let re = Regex::new(pattern).expect("constant Chinese person entity regex");
+        for captures in re.captures_iter(text) {
+            if let Some(entity) = captures.get(1) {
+                push_candidate(candidates, entity.as_str(), score, source_rank, evidence);
+            }
+        }
     }
 }
 
@@ -240,7 +310,10 @@ fn labeled_name_pairs(text: &str) -> Vec<(String, String)> {
         let lower = line.to_ascii_lowercase();
         for label in labels {
             let label_lower = label.to_ascii_lowercase();
-            if lower == label_lower || lower.starts_with(&(label_lower.clone() + ":")) || lower.starts_with(&(label_lower.clone() + "：")) {
+            if lower == label_lower
+                || lower.starts_with(&(label_lower.clone() + ":"))
+                || lower.starts_with(&(label_lower.clone() + "："))
+            {
                 if let Some((_, value)) = line.split_once(':').or_else(|| line.split_once('：')) {
                     if is_plausible_name(value) {
                         pairs.push((label.to_string(), clean_name_candidate(value)));
@@ -257,7 +330,10 @@ fn labeled_name_pairs(text: &str) -> Vec<(String, String)> {
 }
 
 fn filename_name_candidates(filename: &str) -> Vec<String> {
-    let stem = filename.rsplit_once('.').map(|(stem, _)| stem).unwrap_or(filename);
+    let stem = filename
+        .rsplit_once('.')
+        .map(|(stem, _)| stem)
+        .unwrap_or(filename);
     let mut candidates = Vec::new();
 
     for pattern in [
@@ -276,7 +352,11 @@ fn filename_name_candidates(filename: &str) -> Vec<String> {
                     captures.get(2).map(|m| m.as_str()).unwrap_or_default()
                 )
             } else {
-                captures.get(1).map(|m| m.as_str()).unwrap_or_default().to_string()
+                captures
+                    .get(1)
+                    .map(|m| m.as_str())
+                    .unwrap_or_default()
+                    .to_string()
             };
             if is_plausible_name(&value) {
                 candidates.push(clean_name_candidate(&value.replace(['_', '-'], " ")));
@@ -303,21 +383,60 @@ fn filename_name_candidates(filename: &str) -> Vec<String> {
     candidates
 }
 
-fn choose_best_candidate(candidates: Vec<NameCandidate>) -> Option<NameCandidate> {
-    let mut merged: HashMap<String, NameCandidate> = HashMap::new();
-    for candidate in candidates {
-        let key = normalize_candidate(&candidate.value);
-        if key.is_empty() {
+fn resolve_name_candidates(candidates: Vec<NameCandidate>) -> ResolvedNames {
+    let mut merged = merge_exact_candidates(candidates);
+    if merged.is_empty() {
+        return ResolvedNames::default();
+    }
+
+    let keys = merged.keys().cloned().collect::<Vec<_>>();
+    let mut pinyin_pairs = Vec::new();
+    for chinese_key in &keys {
+        let Some(chinese) = merged.get(chinese_key) else {
+            continue;
+        };
+        if !contains_han(&chinese.value) {
             continue;
         }
-        merged
-            .entry(key)
-            .and_modify(|existing| {
-                existing.score = (existing.score + candidate.score / 2).min(120);
-                existing.source_rank = existing.source_rank.min(candidate.source_rank);
-                existing.evidence.extend(candidate.evidence.clone());
-            })
-            .or_insert(candidate);
+        for english_key in &keys {
+            let Some(english) = merged.get(english_key) else {
+                continue;
+            };
+            if contains_han(&english.value) {
+                continue;
+            }
+            if pinyin_equivalent(&chinese.value, &english.value) {
+                pinyin_pairs.push((
+                    chinese_key.clone(),
+                    english_key.clone(),
+                    chinese.score + english.score,
+                ));
+            }
+        }
+    }
+
+    pinyin_pairs.sort_by(|left, right| right.2.cmp(&left.2));
+    if let Some((chinese_key, english_key, pair_score)) = pinyin_pairs.first().cloned() {
+        let runner_up = pinyin_pairs.get(1).map(|pair| pair.2).unwrap_or(i32::MIN);
+        if pair_score >= 145 && pair_score.saturating_sub(runner_up) >= 6 {
+            let mut chinese = merged.remove(&chinese_key).expect("candidate key exists");
+            let mut english = merged.remove(&english_key).expect("candidate key exists");
+            chinese.score = (chinese.score + english.score / 3 + 20).min(140);
+            english.score = (english.score + chinese.score / 6 + 8).min(130);
+            chinese.evidence.push(format!(
+                "pinyin corroboration with English name {}",
+                english.value
+            ));
+            english.evidence.push(format!(
+                "pinyin corroboration with Chinese name {}",
+                chinese.value
+            ));
+            return ResolvedNames {
+                preferred: Some(chinese.clone()),
+                english: Some(english),
+                chinese: Some(chinese),
+            };
+        }
     }
 
     let mut values = merged.into_values().collect::<Vec<_>>();
@@ -328,7 +447,83 @@ fn choose_best_candidate(candidates: Vec<NameCandidate>) -> Option<NameCandidate
             .then_with(|| left.source_rank.cmp(&right.source_rank))
             .then_with(|| contains_han(&right.value).cmp(&contains_han(&left.value)))
     });
-    values.into_iter().find(|candidate| candidate.score >= 88)
+    let Some(best) = values.first().cloned() else {
+        return ResolvedNames::default();
+    };
+    if best.score < 88 {
+        return ResolvedNames::default();
+    }
+    if let Some(second) = values.get(1) {
+        if best.score.saturating_sub(second.score) < 6 {
+            return ResolvedNames::default();
+        }
+    }
+
+    if contains_han(&best.value) {
+        ResolvedNames {
+            preferred: Some(best.clone()),
+            english: None,
+            chinese: Some(best),
+        }
+    } else {
+        ResolvedNames {
+            preferred: Some(best.clone()),
+            english: Some(best),
+            chinese: None,
+        }
+    }
+}
+
+fn merge_exact_candidates(candidates: Vec<NameCandidate>) -> HashMap<String, NameCandidate> {
+    let mut merged: HashMap<String, NameCandidate> = HashMap::new();
+    for candidate in candidates {
+        let key = normalize_candidate(&candidate.value);
+        if key.is_empty() {
+            continue;
+        }
+        merged
+            .entry(key)
+            .and_modify(|existing| {
+                existing.score = (existing.score + candidate.score / 2).min(130);
+                existing.source_rank = existing.source_rank.min(candidate.source_rank);
+                existing.evidence.extend(candidate.evidence.clone());
+            })
+            .or_insert(candidate);
+    }
+    merged
+}
+
+fn pinyin_equivalent(chinese: &str, latin: &str) -> bool {
+    let latin_key = normalize_candidate(latin);
+    if latin_key.is_empty() {
+        return false;
+    }
+    chinese_pinyin_forms(chinese)
+        .iter()
+        .any(|form| form == &latin_key)
+}
+
+fn chinese_pinyin_forms(chinese: &str) -> Vec<String> {
+    let mut syllables = Vec::new();
+    for ch in chinese.chars().filter(|ch| matches!(ch, '\u{4e00}'..='\u{9fff}')) {
+        let Some(pinyin) = ch.to_pinyin() else {
+            return Vec::new();
+        };
+        syllables.push(pinyin.plain().to_ascii_lowercase());
+    }
+    if syllables.len() < 2 {
+        return Vec::new();
+    }
+
+    let direct = syllables.concat();
+    let mut forms = vec![direct];
+    if syllables.len() >= 2 {
+        let given_first = format!("{}{}", syllables[1..].concat(), syllables[0]);
+        if !forms.contains(&given_first) {
+            forms.push(given_first);
+        }
+    }
+    forms
 }
 
 fn push_candidate(
@@ -385,7 +580,8 @@ fn extract_attachment_text(attachment: &Attachment) -> Option<String> {
         return safe_pdf_text(&attachment.bytes);
     }
     if filename.ends_with(".docx")
-        || content_type == "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+        || content_type
+            == "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
     {
         return extract_docx_text(&attachment.bytes);
     }
@@ -416,7 +612,9 @@ fn extract_docx_text(bytes: &[u8]) -> Option<String> {
     let text_re = Regex::new(r"(?is)<w:t\b[^>]*>(.*?)</w:t>").expect("constant Word text regex");
     let mut output = Vec::new();
     for row in row_re.captures_iter(&xml) {
-        let Some(row_body) = row.get(1) else { continue };
+        let Some(row_body) = row.get(1) else {
+            continue;
+        };
         let cells = cell_re
             .captures_iter(row_body.as_str())
             .filter_map(|cell| cell.get(1))
@@ -469,7 +667,9 @@ fn extract_xlsx_text(bytes: &[u8]) -> Option<String> {
 
     let mut output = Vec::new();
     for name in sheet_names {
-        let Ok(mut sheet) = archive.by_name(&name) else { continue };
+        let Ok(mut sheet) = archive.by_name(&name) else {
+            continue;
+        };
         let mut xml = String::new();
         if sheet.read_to_string(&mut xml).is_ok() {
             output.extend(parse_xlsx_rows(&xml, &shared_strings));
@@ -505,7 +705,9 @@ fn parse_xlsx_rows(xml: &str, shared_strings: &[String]) -> Vec<String> {
     let inline_re = Regex::new(r"(?is)<t\b[^>]*>(.*?)</t>").expect("constant XLSX inline regex");
     let mut rows = Vec::new();
     for row in row_re.captures_iter(xml) {
-        let Some(row_body) = row.get(1) else { continue };
+        let Some(row_body) = row.get(1) else {
+            continue;
+        };
         let mut cells = Vec::new();
         for cell in cell_re.captures_iter(row_body.as_str()) {
             let attrs = cell.get(1).map(|m| m.as_str()).unwrap_or_default();
@@ -577,7 +779,9 @@ fn clean_name_candidate(value: &str) -> String {
 }
 
 fn contains_han(value: &str) -> bool {
-    value.chars().any(|ch| matches!(ch, '\u{4e00}'..='\u{9fff}'))
+    value
+        .chars()
+        .any(|ch| matches!(ch, '\u{4e00}'..='\u{9fff}'))
 }
 
 fn normalize_candidate(value: &str) -> String {
@@ -612,8 +816,28 @@ fn is_plausible_name(value: &str) -> bool {
         "payment instructions",
         "education agent",
         "curriculum vitae",
+        "学生",
+        "申请人",
+        "申请材料",
+        "申请信息",
+        "护照",
+        "成绩单",
+        "声明",
+        "真实性声明",
+        "中文签字",
+        "拼音",
+        "姓名",
+        "中文姓名",
+        "英文姓名",
+        "大学",
+        "学校",
+        "课程",
+        "专业",
     ];
-    if blocked_phrases.iter().any(|phrase| lower == *phrase || lower.contains(phrase)) {
+    if blocked_phrases
+        .iter()
+        .any(|phrase| lower == *phrase || lower.contains(phrase))
+    {
         return false;
     }
     if contains_han(&value) {
@@ -621,21 +845,72 @@ fn is_plausible_name(value: &str) -> bool {
             .chars()
             .filter(|ch| matches!(ch, '\u{4e00}'..='\u{9fff}'))
             .count();
-        return (2..=8).contains(&han_count);
+        return (2..=4).contains(&han_count);
     }
     let blocked_tokens = [
-        "application", "applicant", "student", "form", "offer", "passport", "transcript",
-        "resume", "cv", "diploma", "declaration", "genuine", "education", "agent",
-        "nomination", "authorisation", "authorization", "bachelor", "master", "invoice",
-        "university", "college", "school", "course", "program", "programme", "payment",
-        "instructions", "intake", "dates", "update", "flyer", "academic", "merit",
-        "international", "scholarship", "officeworks", "siit", "sg", "stp", "insertpic",
-        "image", "catch", "document", "documents", "january", "february", "march", "april",
-        "may", "june", "july", "august", "september", "october", "november", "december",
+        "application",
+        "applicant",
+        "student",
+        "form",
+        "offer",
+        "passport",
+        "transcript",
+        "resume",
+        "cv",
+        "diploma",
+        "declaration",
+        "genuine",
+        "education",
+        "agent",
+        "nomination",
+        "authorisation",
+        "authorization",
+        "bachelor",
+        "master",
+        "invoice",
+        "university",
+        "college",
+        "school",
+        "course",
+        "program",
+        "programme",
+        "payment",
+        "instructions",
+        "intake",
+        "dates",
+        "update",
+        "flyer",
+        "academic",
+        "merit",
+        "international",
+        "scholarship",
+        "officeworks",
+        "siit",
+        "sg",
+        "stp",
+        "insertpic",
+        "image",
+        "catch",
+        "document",
+        "documents",
+        "january",
+        "february",
+        "march",
+        "april",
+        "may",
+        "june",
+        "july",
+        "august",
+        "september",
+        "october",
+        "november",
+        "december",
     ];
     let tokens = value
         .split_whitespace()
-        .map(|token| token.trim_matches(|ch: char| !ch.is_alphabetic() && ch != '\'' && ch != '-'))
+        .map(|token| {
+            token.trim_matches(|ch: char| !ch.is_alphabetic() && ch != '\'' && ch != '-')
+        })
         .filter(|token| !token.is_empty())
         .collect::<Vec<_>>();
     if !(2..=4).contains(&tokens.len()) {
@@ -709,6 +984,16 @@ mod tests {
     }
 
     #[test]
+    fn subject_entity_without_name_label_is_recognized() {
+        let message = ParsedMessage {
+            subject: Some("Application update - LI Baichuan".into()),
+            ..Default::default()
+        };
+        let identity = DeterministicExtractor.extract(&message);
+        assert_eq!(identity.name.unwrap().value, "LI Baichuan");
+    }
+
+    #[test]
     fn filename_consensus_extracts_li_baichuan() {
         let message = ParsedMessage {
             attachments: vec![
@@ -733,6 +1018,35 @@ mod tests {
         };
         let identity = DeterministicExtractor.extract(&message);
         assert_eq!(identity.name.unwrap().value, "WU Lanbing");
+    }
+
+    #[test]
+    fn pinyin_corroboration_prefers_chinese_canonical_name() {
+        let message = ParsedMessage {
+            subject: Some("Application - WU Lanbing".into()),
+            text_body: "中文姓名：吴兰冰".into(),
+            ..Default::default()
+        };
+        let identity = DeterministicExtractor.extract(&message);
+        assert_eq!(identity.name.as_ref().unwrap().value, "吴兰冰");
+        assert_eq!(identity.chinese_name.as_ref().unwrap().value, "吴兰冰");
+        assert_eq!(identity.english_name.as_ref().unwrap().value, "WU Lanbing");
+    }
+
+    #[test]
+    fn pinyin_corroboration_accepts_given_name_first_order() {
+        assert!(pinyin_equivalent("李百川", "Baichuan Li"));
+        assert!(pinyin_equivalent("李百川", "LI Baichuan"));
+    }
+
+    #[test]
+    fn unlabeled_entity_needs_corroboration_outside_subject() {
+        let message = ParsedMessage {
+            text_body: "Please process LI Baichuan application materials.".into(),
+            ..Default::default()
+        };
+        let identity = DeterministicExtractor.extract(&message);
+        assert!(identity.name.is_none());
     }
 
     #[test]
