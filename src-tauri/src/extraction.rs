@@ -415,7 +415,7 @@ fn resolve_name_candidates(candidates: Vec<NameCandidate>) -> ResolvedNames {
         }
     }
 
-    pinyin_pairs.sort_by(|left, right| right.2.cmp(&left.2));
+    pinyin_pairs.sort_by_key(|left| std::cmp::Reverse(left.2));
     if let Some((chinese_key, english_key, pair_score)) = pinyin_pairs.first().cloned() {
         let runner_up = pinyin_pairs.get(1).map(|pair| pair.2).unwrap_or(i32::MIN);
         if pair_score >= 145 && pair_score.saturating_sub(runner_up) >= 6 {
