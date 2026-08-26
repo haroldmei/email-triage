@@ -59,6 +59,8 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - name: Apply local OCR/NER integration patch
         run: python scripts/apply-local-ml-patch.py
+      - name: Apply application-material relevance gate
+        run: python scripts/apply-application-filter-patch.py
       - name: Verify Google OAuth configuration
         run: node -e "if (!process.env.VITE_GOOGLE_CLIENT_ID || !process.env.VITE_GOOGLE_CLIENT_ID.trim() || !process.env.GOOGLE_OAUTH_CLIENT_SECRET || !process.env.GOOGLE_OAUTH_CLIENT_SECRET.trim()) { console.error('GOOGLE_OAUTH_CLIENT_ID and GOOGLE_OAUTH_CLIENT_SECRET are required for release builds'); process.exit(1); }"
       - run: npm install
