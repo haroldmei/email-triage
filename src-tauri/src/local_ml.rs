@@ -1,4 +1,4 @@
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use base64::{engine::general_purpose::STANDARD, Engine as _};
 use serde::{Deserialize, Serialize};
@@ -7,6 +7,8 @@ use tauri::AppHandle;
 use crate::{extraction, logging, models::ParsedMessage};
 
 const LOCAL_ML_URL: &str = "http://127.0.0.1:8765/extract";
+const LOCAL_ML_CONNECT_TIMEOUT_SECS: u64 = 5;
+const LOCAL_ML_REQUEST_TIMEOUT_SECS: u64 = 600;
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -111,7 +113,11 @@ pub async fn enrich_message(app: &AppHandle, uid: u32, message: &ParsedMessage) 
         attachments,
     };
 
-    let client = match reqwest::Client::builder().timeout(Duration::from_secs(90)).build() {
+    let client = match reqwest::Client::builder()
+        .connect_timeout(Duration::from_secs(LOCAL_ML_CONNECT_TIMEOUT_SECS))
+        .timeout(Duration::from_secs(LOCAL_ML_REQUEST_TIMEOUT_SECS))
+        .build()
+    {
         Ok(client) => client,
         Err(error) => {
             logging::write(app, "WARN", format!("stage=local_ml uid={uid} available=false reason=client_build_failed error=\"{}\"", error.to_string().replace('"', "'")));
@@ -119,26 +125,72 @@ pub async fn enrich_message(app: &AppHandle, uid: u32, message: &ParsedMessage) 
         }
     };
 
+    let request_started = Instant::now();
+    logging::write(
+        app,
+        "INFO",
+        format!(
+            "stage=local_ml_request uid={uid} action=start attachments={} timeout_secs={LOCAL_ML_REQUEST_TIMEOUT_SECS}",
+            message.attachments.len()
+        ),
+    );
+
     let response = match client.post(LOCAL_ML_URL).json(&request).send().await {
         Ok(response) => response,
         Err(error) => {
-            logging::write(app, "WARN", format!("stage=local_ml uid={uid} available=false reason=worker_unavailable error=\"{}\"", error.to_string().replace('"', "'")));
+            logging::write(
+                app,
+                "WARN",
+                format!(
+                    "stage=local_ml_request uid={uid} action=failed elapsed_ms={} error=\"{}\"",
+                    request_started.elapsed().as_millis(),
+                    error.to_string().replace('"', "'")
+                ),
+            );
             return fallback(message);
         }
     };
 
-    if !response.status().is_success() {
-        logging::write(app, "WARN", format!("stage=local_ml uid={uid} available=true success=false http_status={}", response.status()));
+    let status = response.status();
+    if !status.is_success() {
+        let body = response.text().await.unwrap_or_default();
+        logging::write(
+            app,
+            "WARN",
+            format!(
+                "stage=local_ml_request uid={uid} action=http_error elapsed_ms={} http_status={} body=\"{}\"",
+                request_started.elapsed().as_millis(),
+                status,
+                body.chars().take(500).collect::<String>().replace('"', "'")
+            ),
+        );
         return fallback(message);
     }
 
     let result = match response.json::<MlResponse>().await {
         Ok(result) => result,
         Err(error) => {
-            logging::write(app, "WARN", format!("stage=local_ml uid={uid} available=true success=false reason=invalid_response error=\"{}\"", error.to_string().replace('"', "'")));
+            logging::write(
+                app,
+                "WARN",
+                format!(
+                    "stage=local_ml_request uid={uid} action=invalid_response elapsed_ms={} error=\"{}\"",
+                    request_started.elapsed().as_millis(),
+                    error.to_string().replace('"', "'")
+                ),
+            );
             return fallback(message);
         }
     };
+
+    logging::write(
+        app,
+        "INFO",
+        format!(
+            "stage=local_ml_request uid={uid} action=complete elapsed_ms={}",
+            request_started.elapsed().as_millis()
+        ),
+    );
 
     let relevant_filenames = result
         .attachment_decisions
@@ -162,7 +214,6 @@ pub async fn enrich_message(app: &AppHandle, uid: u32, message: &ParsedMessage) 
         );
     }
 
-    // Only relevant application attachments may contribute OCR/text to the identity resolver.
     let mut enriched = message.clone();
     enriched.attachments.retain(|attachment| {
         relevant_filenames.iter().any(|filename| filename == &attachment.filename)
