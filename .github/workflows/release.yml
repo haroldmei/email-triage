@@ -62,7 +62,7 @@ jobs:
       - name: Apply application-material relevance gate
         run: python scripts/apply-application-filter-patch.py
       - name: Apply ML worker resilience patch
-        run: python scripts/apply-worker-resilience-patch.py
+        run: python scripts/apply-worker-resilience-v0123.py
       - name: Validate local ML worker syntax
         run: python -m py_compile ml-worker/worker.py
       - name: Verify Google OAuth configuration
