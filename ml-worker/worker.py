@@ -5,6 +5,7 @@ import base64
 import io
 import json
 import re
+from collections.abc import Iterable
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 
@@ -17,6 +18,7 @@ NER_MODEL = None
 BLOCKED_NAMES = {
     "选择对应", "点击查看", "查看详情", "申请材料", "相关文件", "学生信息", "申请状态",
     "上传文件", "查看文件", "附件信息", "申请信息", "文件材料", "对应材料",
+    "ocr error", "order no", "order number", "shinyway sydney",
 }
 
 NER_LABELS = [
@@ -24,9 +26,6 @@ NER_LABELS = [
     "student english name",
     "student name",
     "applicant name",
-    "application id",
-    "university",
-    "course",
 ]
 
 
@@ -61,15 +60,21 @@ def flatten_ocr_result(value: Any, output: list[str]) -> None:
                 flatten_ocr_result(value[key], output)
         return
     if isinstance(value, (list, tuple)):
-        # PaddleOCR classic API commonly emits [box, (text, confidence)].
         if len(value) == 2 and isinstance(value[1], (list, tuple)) and value[1] and isinstance(value[1][0], str):
             flatten_ocr_result(value[1][0], output)
             return
         for item in value:
             flatten_ocr_result(item, output)
         return
+    # PaddleOCR 3 may return an iterator/generator of result objects.
+    if isinstance(value, Iterable) and not isinstance(value, (bytes, bytearray)):
+        try:
+            for item in value:
+                flatten_ocr_result(item, output)
+            return
+        except TypeError:
+            pass
 
-    # PaddleOCR v3 result objects expose a json/res attribute depending on version.
     for attr in ("json", "res"):
         if hasattr(value, attr):
             try:
@@ -84,29 +89,34 @@ def flatten_ocr_result(value: Any, output: list[str]) -> None:
 
 def run_ocr(image_bytes: bytes) -> str:
     image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
-    array = np.asarray(image)
-    texts: list[str] = []
-
-    # Prefer the newer predict API, then fall back to the classic ocr API.
-    try:
-        result = OCR_MODEL.predict(array)
-    except Exception:
-        result = OCR_MODEL.ocr(array)
-    flatten_ocr_result(result, texts)
-
-    # Deduplicate while preserving order; OCR engines can expose the same text in multiple fields.
-    seen: set[str] = set()
-    unique: list[str] = []
-    for text in texts:
-        if text not in seen:
-            seen.add(text)
-            unique.append(text)
-    return "\n".join(unique)
+    array = np.ascontiguousarray(np.asarray(image))
+    errors: list[str] = []
+    for call in (
+        lambda: OCR_MODEL.predict(array),
+        lambda: OCR_MODEL.predict(input=array),
+        lambda: OCR_MODEL.ocr(array),
+    ):
+        texts: list[str] = []
+        try:
+            result = call()
+            flatten_ocr_result(result, texts)
+            unique: list[str] = []
+            seen: set[str] = set()
+            for text in texts:
+                if text not in seen:
+                    seen.add(text)
+                    unique.append(text)
+            if unique:
+                return "\n".join(unique)
+            errors.append("OCR call returned no recognized text")
+        except Exception as exc:
+            errors.append(f"{type(exc).__name__}: {exc}")
+    raise RuntimeError("; ".join(errors)[:1200])
 
 
 def plausible_student_name(value: str) -> bool:
     value = value.strip(" \t\r\n:：,，;；.-")
-    if not value or value in BLOCKED_NAMES:
+    if not value or value.lower() in BLOCKED_NAMES:
         return False
     if re.fullmatch(r"[\u4e00-\u9fff]{2,4}", value):
         return True
@@ -115,11 +125,30 @@ def plausible_student_name(value: str) -> bool:
     return False
 
 
+def filename_candidate(text: str) -> tuple[str | None, float, str]:
+    for line in text.splitlines():
+        if not line.startswith("[ATTACHMENT "):
+            continue
+        filename = line.removeprefix("[ATTACHMENT ").removesuffix("]").strip()
+        stem = filename.rsplit(".", 1)[0]
+        patterns = [
+            r"(?:^|[_\-–— ])([A-Z]{2,20}[ _-]+[A-Z][A-Za-z'-]{1,30})(?:$|[_\-–— ])",
+            r"(?:^|[_\-–— ])([A-Z][A-Za-z'-]{1,30}[ _-]+[A-Z][A-Za-z'-]{1,30})(?:$|[_\-–— ])",
+            r"^([\u4e00-\u9fff]{2,4})(?:[_\-–— ]|的)(?:护照|成绩单|申请|申请表|材料|offer|录取)",
+        ]
+        for pattern in patterns:
+            match = re.search(pattern, stem)
+            if match:
+                value = match.group(1).replace("_", " ").replace("-", " ").strip()
+                if plausible_student_name(value):
+                    return value, 0.97, f"student-like name in attachment filename {filename}"
+    return None, 0.0, ""
+
+
 def extract_student_name(text: str) -> tuple[str | None, float, str]:
-    # High precision structured fields first. These are preferable to generic NER.
     patterns = [
-        r"(?im)^\s*(?:学生姓名|申请人姓名|中文姓名|中文名|student\s*name|applicant\s*name|chinese\s*name)\s*[:：]\s*([^\r\n]{2,60})\s*$",
-        r"(?im)^\s*(?:学生姓名|申请人姓名|中文姓名|中文名|student\s*name|applicant\s*name|chinese\s*name)\s*$\r?\n\s*([^\r\n]{2,60})\s*$",
+        r"(?im)^\s*(?:学生姓名|申请人姓名|申请学生姓名|中文姓名|中文名|student\s*name|applicant\s*name|chinese\s*name)\s*[:：=]\s*([^\r\n]{2,60})\s*$",
+        r"(?im)^\s*(?:学生姓名|申请人姓名|申请学生姓名|中文姓名|中文名|student\s*name|applicant\s*name|chinese\s*name)\s*$\r?\n\s*([^\r\n]{2,60})\s*$",
     ]
     for pattern in patterns:
         match = re.search(pattern, text)
@@ -128,7 +157,10 @@ def extract_student_name(text: str) -> tuple[str | None, float, str]:
             if plausible_student_name(value):
                 return value, 0.99, "explicit labeled student/applicant name"
 
-    entities = NER_MODEL.predict_entities(text[:12000], NER_LABELS, threshold=0.45)
+    value, score, evidence = filename_candidate(text)
+    if value:
+        return value, score, evidence
+
     preferred_labels = {
         "student chinese name": 4,
         "student name": 3,
@@ -136,12 +168,16 @@ def extract_student_name(text: str) -> tuple[str | None, float, str]:
         "student english name": 1,
     }
     ranked: list[tuple[int, float, str, str]] = []
-    for entity in entities:
-        label = str(entity.get("label", "")).lower().strip()
-        value = str(entity.get("text", "")).strip()
-        score = float(entity.get("score", 0.0))
-        if label in preferred_labels and plausible_student_name(value):
-            ranked.append((preferred_labels[label], score, value, label))
+    # Run a few bounded chunks instead of truncating the whole message at one arbitrary boundary.
+    chunks = [text[i:i + 4000] for i in range(0, min(len(text), 20000), 4000)]
+    for chunk in chunks:
+        entities = NER_MODEL.predict_entities(chunk, NER_LABELS, threshold=0.40)
+        for entity in entities:
+            label = str(entity.get("label", "")).lower().strip()
+            value = str(entity.get("text", "")).strip()
+            score = float(entity.get("score", 0.0))
+            if label in preferred_labels and plausible_student_name(value):
+                ranked.append((preferred_labels[label], score, value, label))
     if not ranked:
         return None, 0.0, "no student/applicant entity"
     ranked.sort(key=lambda item: (item[0], item[1]), reverse=True)
@@ -151,8 +187,11 @@ def extract_student_name(text: str) -> tuple[str | None, float, str]:
 
 def handle_extract(payload: dict[str, Any]) -> dict[str, Any]:
     ensure_models()
-    parts = [payload.get("subject") or "", payload.get("textBody") or "", payload.get("htmlBody") or ""]
+    subject = payload.get("subject") or ""
+    body = "\n".join([payload.get("textBody") or "", payload.get("htmlBody") or ""])
+    document_text = payload.get("documentText") or ""
     ocr_chunks: list[str] = []
+    ocr_errors: list[str] = []
 
     for attachment in payload.get("attachments") or []:
         try:
@@ -162,17 +201,19 @@ def handle_extract(payload: dict[str, Any]) -> dict[str, Any]:
             text = run_ocr(data)
             if text.strip():
                 filename = attachment.get("filename") or "image"
-                ocr_chunks.append(f"[{filename}]\n{text}")
+                ocr_chunks.append(f"[ATTACHMENT {filename}]\n{text}")
         except Exception as exc:
-            ocr_chunks.append(f"[OCR_ERROR {attachment.get('filename', 'image')}: {exc}]")
+            filename = attachment.get("filename") or "image"
+            ocr_errors.append(f"{filename}: {type(exc).__name__}: {exc}"[:1400])
 
     ocr_text = "\n".join(ocr_chunks)
-    parts.append(ocr_text)
-    combined = "\n".join(part for part in parts if part)
+    # Put high-signal attachment/filename content before generic email body for NER.
+    combined = "\n".join(part for part in [subject, document_text[:12000], ocr_text[:12000], body[:6000]] if part)
     student_name, confidence, evidence = extract_student_name(combined)
 
     return {
         "ocrText": ocr_text,
+        "ocrErrors": ocr_errors,
         "studentName": student_name,
         "confidence": confidence,
         "evidence": evidence,
@@ -180,7 +221,7 @@ def handle_extract(payload: dict[str, Any]) -> dict[str, Any]:
 
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = "EmailTriageLocalML/0.1.19"
+    server_version = "EmailTriageLocalML/0.1.20"
 
     def log_message(self, fmt: str, *args: Any) -> None:
         print(fmt % args, flush=True)
@@ -206,8 +247,7 @@ class Handler(BaseHTTPRequestHandler):
         try:
             length = int(self.headers.get("Content-Length", "0"))
             payload = json.loads(self.rfile.read(length).decode("utf-8"))
-            result = handle_extract(payload)
-            self._json(200, result)
+            self._json(200, handle_extract(payload))
         except Exception as exc:
             self._json(500, {"error": str(exc)})
 
@@ -218,7 +258,6 @@ def main() -> None:
     parser.add_argument("--port", type=int, default=8765)
     parser.add_argument("--preload", action="store_true")
     args = parser.parse_args()
-
     if args.preload:
         ensure_models()
     print(f"Local OCR/NER worker listening on http://{args.host}:{args.port}", flush=True)
