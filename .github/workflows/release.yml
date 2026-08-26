@@ -57,6 +57,8 @@ jobs:
         with:
           node-version: 22
       - uses: dtolnay/rust-toolchain@stable
+      - name: Apply local OCR/NER integration patch
+        run: python scripts/apply-local-ml-patch.py
       - name: Verify Google OAuth configuration
         run: node -e "if (!process.env.VITE_GOOGLE_CLIENT_ID || !process.env.VITE_GOOGLE_CLIENT_ID.trim() || !process.env.GOOGLE_OAUTH_CLIENT_SECRET || !process.env.GOOGLE_OAUTH_CLIENT_SECRET.trim()) { console.error('GOOGLE_OAUTH_CLIENT_ID and GOOGLE_OAUTH_CLIENT_SECRET are required for release builds'); process.exit(1); }"
       - run: npm install
@@ -69,6 +71,9 @@ jobs:
             src-tauri/target/release/bundle/**/*.msi
             src-tauri/target/release/bundle/**/*-setup.exe
             src-tauri/target/release/bundle/**/*.dmg
+            ml-worker/worker.py
+            ml-worker/requirements.txt
+            ml-worker/start-windows.ps1
           if-no-files-found: error
 
   publish-release:
