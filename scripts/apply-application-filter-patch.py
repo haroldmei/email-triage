@@ -64,7 +64,7 @@ replace_once(
             app,
             "WARN",
             format!(
-                "stage=student_identity_gate uid={} relevant_attachments={} action=needs_review evidence=\"{}\"",
+                "stage=student_identity_gate uid={} relevant_attachments={} action=needs_review evidence={}",
                 fetched.uid,
                 enrichment.relevant_filenames.len(),
                 enrichment.evidence.replace('"', "'")
