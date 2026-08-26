@@ -1,0 +1,6 @@
+paddleocr>=3.2,<4
+paddlepaddle>=3,<4
+gliner>=0.2.22,<0.3
+torch>=2.6
+pillow>=10
+numpy>=1.26
