@@ -17,14 +17,20 @@ if (-not (Test-Path $Venv)) {
 }
 
 $VenvPython = Join-Path $Venv 'Scripts\python.exe'
-$Stamp = Join-Path $Venv '.email-triage-ml-ready'
+$Stamp = Join-Path $Venv '.email-triage-ml-ready-v0122'
 if (-not (Test-Path $Stamp)) {
-  Write-Host 'Installing PaddleOCR + GLiNER CPU dependencies. The first setup is large because model runtimes are downloaded locally.'
+  Write-Host 'Installing/updating PaddleOCR + GLiNER CPU dependencies for 0.1.22.'
   & $VenvPython -m pip install --upgrade pip
   & $VenvPython -m pip install -r (Join-Path $Here 'requirements.txt')
   New-Item -ItemType File -Path $Stamp -Force | Out-Null
 }
 
-Write-Host 'Starting local OCR/NER worker on 127.0.0.1:8765.'
-Write-Host 'The first model load downloads the open model weights and may take several minutes.'
+# Work around the Paddle 3.x Windows oneDNN/PIR executor failure observed in 0.1.21.
+$env:FLAGS_use_mkldnn = '0'
+$env:FLAGS_use_onednn = '0'
+$env:FLAGS_enable_pir_api = '0'
+$env:OMP_NUM_THREADS = '4'
+
+Write-Host 'Starting local OCR/NER worker 0.1.22 on 127.0.0.1:8765.'
+Write-Host 'Paddle oneDNN/PIR execution is disabled for Windows compatibility.'
 & $VenvPython (Join-Path $Here 'worker.py') --preload
